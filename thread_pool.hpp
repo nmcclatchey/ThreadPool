@@ -150,6 +150,12 @@ class ThreadPool
 /// returns the number of tasks that can be concurrently executed by the thread
 /// pool.
   unsigned get_concurrency (void) const;
+
+/// \brief  Returns whether the pool is currently idle.
+/// \return \c true if the pool is idle, or \c false if not.
+///
+///   Returns whether the pool is idle. May return \c false spuriously.
+  bool is_idle (void) const;
 };
 
 #endif // THREAD_POOL_HPP_

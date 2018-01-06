@@ -40,7 +40,8 @@
 #endif
 
 #ifndef THREAD_POOL_FALSE_SHARING_ALIGNMENT
-#if (__cplusplus >= 201703L)
+#if false && (__cplusplus >= 201703L)
+//  Note: Not yet in GCC.
 #define THREAD_POOL_FALSE_SHARING_ALIGNMENT std::hardware_destructive_interference_size
 #else
 #define THREAD_POOL_FALSE_SHARING_ALIGNMENT 64
@@ -593,7 +594,7 @@ void Worker::operator() (void)
 //  Fifth, wait a bit for something to change...
     size_t num_threads = pool_.get_concurrency();
     bool should_idle = (count_tasks() == 0);
-    for (size_t n = num_threads; n && should_idle; --n)
+    for (size_t n = num_threads; n-- && should_idle;)
     {
       Worker * victim = pool_.workers_ + n;
       should_idle = (victim->count_tasks() < 2);
@@ -667,6 +668,12 @@ void ThreadPoolImpl::schedule_overflow (task_type && task)
 unsigned ThreadPool::get_concurrency(void) const
 {
   return static_cast<ThreadPoolImpl*>(impl_)->threads_;
+}
+
+bool ThreadPool::is_idle (void) const
+{
+  const ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
+  return impl->idle_ == impl->threads_;
 }
 
 #ifndef NDEBUG

@@ -38,7 +38,7 @@ pool.schedule([](void)
 
 ## Running the tests
 
-Compile tests.cpp, then link with the compiled object from thread_pool.cpp. Run the resulting executable. The test should complete some or all of the 80000000 simple tasks. As a point of interest, the test will state the minimum and maximum number of tasks executed by workers; this can be used to estimate how well the scheduler is balancing work across threads.
+Compile tests.cpp, then link with the compiled object from thread_pool.cpp. Run the resulting executable. The test should complete some or all of the 80000000 simple tasks within the time allotted; tasks remaining in the pool when the pool is destroyed are ignored. The test will then wait for 10 seconds, to test idle performance, followed by a repeat of the previous test. As a point of interest, the test will state the minimum and maximum number of tasks executed by workers; this can be used to estimate how well the scheduler is balancing work across threads.
 
 ## Authors
 
