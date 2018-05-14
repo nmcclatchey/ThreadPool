@@ -1,124 +1,140 @@
+//  Include this first to check for missed dependencies.
 #include "../thread_pool.hpp"
 
-#include <mutex>
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>
-#include <condition_variable>
 #else
 #include <mingw.thread.h>
-#include <mingw.mutex.h>
-#include <mingw.condition_variable.h>
 #endif
-#include <assert.h>
-#include <map>
+#include <cassert>
+#include <cstdio>
+#include <atomic>
+
+#define LOG(fmtString,...) printf(fmtString "\n", ##__VA_ARGS__); fflush(stdout)
 
 using namespace std;
 
-thread_local uint_fast64_t executed_tasks = 0;
+constexpr size_t kTestMaxThreads = 1024;
+constexpr size_t kTestRootTasks = 10000;
+constexpr size_t kTestBranchFactor = 8000;
+constexpr size_t kTestTotalTasks = kTestRootTasks * kTestBranchFactor;
 
-std::mutex completed_mutex;
-std::condition_variable completed_cv;
-std::map<typename std::thread::id, uint_fast64_t> completed_tasks;
 
-void record_executed (ThreadPool & pool)
+void perform_task (void);
+void gather_statistics  (uint_fast64_t & balance_min,
+                         uint_fast64_t & balance_max,
+                         uint_fast64_t & balance_total);
+
+thread_local std::atomic<uint_fast64_t> * task_slot_local = nullptr;
+std::atomic<uint_fast32_t> task_slot_next(0);
+std::atomic<uint_fast64_t> executed_tasks [kTestMaxThreads * 64];
+
+void perform_task (void)
 {
-  typedef std::pair<typename decltype(completed_tasks)::iterator, bool> res;
-  res it_bool;
+  if (task_slot_local == nullptr)
   {
-    std::lock_guard<decltype(completed_mutex)> guard (completed_mutex);
-    it_bool = completed_tasks.insert(std::make_pair(std::this_thread::get_id(), executed_tasks));
-    executed_tasks = 0;
+    auto n = task_slot_next.fetch_add(1, std::memory_order_relaxed);
+    assert(n < kTestMaxThreads);
+    task_slot_local = executed_tasks + (n * 64 / sizeof(*executed_tasks));
   }
-  assert(it_bool.second);
-
-  std::unique_lock<decltype(completed_mutex)> guard (completed_mutex);
-  if (completed_tasks.size() >= pool.get_concurrency())
-    completed_cv.notify_all();
-  else
-    completed_cv.wait(guard, [&pool](void)->bool { return completed_tasks.size() >= pool.get_concurrency(); });
+  task_slot_local->fetch_add(1, std::memory_order_release);
 }
 
-#define LOG(fmtString,...) printf(fmtString "\n", ##__VA_ARGS__); fflush(stdout)
+void gather_statistics  (uint_fast64_t & balance_min,
+                         uint_fast64_t & balance_max,
+                         uint_fast64_t & balance_total)
+{
+  balance_min = ~static_cast<uint_fast64_t>(0);
+  balance_max = balance_total = 0;
+  for (uint_fast32_t n = 0; n < task_slot_next.load(std::memory_order_acquire); ++n)
+  {
+    auto it = executed_tasks[n * 8].load(std::memory_order_relaxed);
+    if (balance_max < it)
+      balance_max = it;
+    if (balance_min > it)
+      balance_min = it;
+    balance_total += it;
+  }
+}
+
 int main()
 {
-  LOG("Constructing a thread pool.");
-  ThreadPool pool;
-  LOG("\tDone.");
-  printf("\tPool has %u worker threads.\n", pool.get_concurrency());
-  for (unsigned nn = 0; nn < 2; ++nn)
   {
-    LOG("Starting a test.");
-    completed_tasks.clear();
-    LOG("Scheduling some tasks...");
-    pool.schedule([&](void)
+    LOG("Test %u:\t%s",1,"Construct and destroy empty threadpool.");
     {
-      for (unsigned i = 0; i < 10000; ++i)
-      {
-        pool.schedule([&](void)
-        {
-          for (unsigned j = 0; j < 8000; ++j)
-          {
-            pool.schedule_subtask([&](void)
-            {
-              ++executed_tasks;
-  //            if (cnt.fetch_add(1, std::memory_order_relaxed) + 1 == 10000 * 8000) t = glfwGetTimerValue() - t;
-            });
-          }
-        });
-      }
-    });
-    LOG("\tDone.");
-    LOG("Waiting a bit, to give time for completion...");
-    Sleep(1000);
-    LOG("Scheduling a recording operation...");
-    for (unsigned i = 0; i < pool.get_concurrency(); ++i)
+    ThreadPool pool;
+    LOG("\t%s","Construct successful.");
+    }
+    LOG("\t%s","Destroy successful.");
+  }
+  int logged_errors = 0;
+  {
+    LOG("Test %u:\t%s",2,"Use threadpool for tasks.");
+    LOG("\t%s","Constructing a thread pool.");
+    ThreadPool pool;
+    LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
+    for (unsigned nn = 0; nn < 2; ++nn)
     {
+      LOG("\t%s","Resetting task-recording utilities...");
+      for (unsigned i = 0; i < 8 * 64; ++i)
+        executed_tasks[i].store(0, std::memory_order_release);
+      bool already_idling = false;
+
+      LOG("\t%s","Scheduling some tasks...");
       pool.schedule([&](void)
       {
-        record_executed(pool);
-      });
-    }
-    LOG("\tDone.");
-    LOG("Waiting until all threads record something...");
-    {
-      std::unique_lock<decltype(completed_mutex)> guard (completed_mutex);
-      completed_cv.wait(guard, [&pool](void)->bool { return completed_tasks.size() >= pool.get_concurrency(); });
-      LOG("\tDone.");
-    }
-
-    uint_fast64_t balance_min, balance_max, balance_total;
-    balance_min = ~static_cast<uint_fast64_t>(0);
-    balance_max = balance_total = 0;
-    for (auto it = completed_tasks.begin(); it != completed_tasks.end(); ++it)
-    {
-      if (balance_max < it->second)
-        balance_max = it->second;
-      if (balance_min > it->second)
-        balance_min = it->second;
-      balance_total += it->second;
-    }
-    printf("Completed %u tasks\n", balance_total);
-    printf("Processor utilization min / max / mean :\t%u / %u / %u\n", balance_min, balance_max, balance_total / pool.get_concurrency());
-
-    for (unsigned ii = 0; ii < 10; ++ii)
-    {
-      Sleep(1000);
-      if (pool.is_idle())
-      {
-        LOG("Pool has idled, as expected.");
-        break;
-      }
-      else
-      {
-        if (balance_total == 80000000)
+        for (unsigned i = 0; i < kTestRootTasks; ++i)
         {
-          LOG("Pool has not yet idled; this is probably an error.");
+          pool.schedule([&](void)
+          {
+            for (unsigned j = 0; j < kTestBranchFactor; ++j)
+            {
+              pool.schedule_subtask(&perform_task);
+            }
+          });
         }
-        else
-          LOG("Pool has not yet idled; this is unexpected, but might be due to remaining tasks.");
+      });
+      LOG("\t\t%s","Done. Tasks scheduled successfully.");
+      LOG("\t%s","Waiting a bit while tasks complete...");
+
+      unsigned total_ms = 0;
+      for (unsigned ii = 0; ii < 9; ++ii)
+      {
+        using namespace std::chrono_literals;
+        unsigned sleep_ms = (100 << ii);
+        std::this_thread::sleep_for(1ms * sleep_ms);
+        total_ms += sleep_ms;
+
+        LOG("\t\t%s","Checking whether tasks are completed...");
+        uint_fast64_t balance_min, balance_max, balance_total;
+        gather_statistics(balance_min, balance_max, balance_total);
+        LOG("\t\tCompleted %llu / %llu tasks so far.", balance_total, kTestTotalTasks);
+        if (pool.is_idle())
+        {
+          gather_statistics(balance_min, balance_max, balance_total);
+          LOG("\tPool has idled, as expected (%llu / %llu tasks complete.", balance_total, kTestTotalTasks);
+          LOG("\tProcessor utilization [min / mean / max]:\t%llu / %llu / %llu", balance_min, balance_total / pool.get_concurrency(), balance_max);
+          break;
+        }
+        else if (balance_total == kTestTotalTasks)
+        {
+          if (already_idling)
+          {
+            LOG("\t%s","Pool has not yet idled, despite all tasks being complete; this is probably an error.");
+            logged_errors |= 1;
+          } else
+            already_idling = true;
+        }
+      }
+      if (!pool.is_idle())
+      {
+        LOG("\t\tPool failed to complete all tasks after %u seconds. There is probably an error.", total_ms / 1000);
+        logged_errors |= 2;
       }
     }
+    LOG("\t%s", "Destroying the thread pool.");
   }
-  return 0;
+  LOG("%s", "Exiting...");
+  return logged_errors;
 }
 

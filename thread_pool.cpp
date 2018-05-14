@@ -1,12 +1,12 @@
 /// \file   thread_pool.cpp
 /// \brief  Implements \ref thread_pool.hpp.
-/// \author Nathaniel J. McClatchey
+/// \author Nathaniel J. McClatchey, PhD
+/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.  \n
+///   Licensed under the MIT license. \n
+///   You should have received a copy of the license with this software.
 /// \note   To compile for MinGW-w64 without linking against the winpthreads
 /// library, use the <a href=https://github.com/nmcclatchey/mingw-std-threads>
 /// MinGW Windows STD Threads library</a>.
-/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey.  \n
-///   Licensed under the Simplified BSD 2-clause license. \n
-///   You should have received a copy of the license with this software.
 #include "thread_pool.hpp"
 
 #if !defined(__cplusplus) || (__cplusplus < 201103L)
@@ -16,39 +16,39 @@
 #include <atomic>             //  For atomic indexes, etc.
 #include <queue>              //  For central task queue
 
-#include <mutex>              //  For locking of central queue.
-
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>             //  For threads. Duh.
+#include <mutex>              //  For locking of central queue.
 #include <condition_variable> //  Let threads sleep instead of spin when idle.
 #else
 //    This toolchain-specific workaround allows ThreadPool to be used with
 //  MinGW-w64 even without linking the winpthreads library. If you lack these
 //  headers, you can find them at https://github.com/nmcclatchey/mingw-std-threads .
-#pragma message "Using native WIN32 threads for thread pools (" __FILE__ ")."
 #include "mingw.thread.h"
 #include "mingw.mutex.h"
 #include "mingw.condition_variable.h"
 #endif
 
+#include <cstdlib>            //  For std::malloc and std::free
 #include <memory>             //  For std::align
 #include <climits>            //  For CHAR_BIT
 
-#include <assert.h>           //  For debugging: Fail deadly.
+#include <cassert>            //  For debugging: Fail deadly.
 #ifndef NDEBUG
-#include <iostream>           //  For debugging: Warn on task queue overflow.
+#include <cstdio>           //  For debugging: Warn on task queue overflow.
 #endif
 
+/*#if (__cplusplus >= 201703L)
+#include <new>                //  For alignment purposes.
+#endif*/
 #ifndef THREAD_POOL_FALSE_SHARING_ALIGNMENT
 #if false && (__cplusplus >= 201703L)
 //  Note: Not yet in GCC.
+#include <new>                //  For alignment purposes.
 #define THREAD_POOL_FALSE_SHARING_ALIGNMENT std::hardware_destructive_interference_size
 #else
 #define THREAD_POOL_FALSE_SHARING_ALIGNMENT 64
 #endif
-#endif
-#if (__cplusplus >= 201703L)
-#include <new>                //  For alignment purposes.
 #endif
 
 namespace {
@@ -56,7 +56,6 @@ struct Worker;
 struct ThreadPoolImpl;
 
 thread_local Worker * current_worker = nullptr;
-
 
 struct ThreadPoolImpl
 {
@@ -67,17 +66,18 @@ struct ThreadPoolImpl
   ThreadPoolImpl (const ThreadPoolImpl &) = delete;
   ThreadPoolImpl & operator= (const ThreadPoolImpl &) = delete;
 
-  void schedule_overflow (task_type &&);
+  template<typename Task>
+  void schedule_overflow (Task &&);
 
   unsigned get_concurrency (void) const;
 // private:
   std::mutex mutex_;
   std::condition_variable cv_;
   std::queue<task_type> queue_;
-
+  unsigned idle_, threads_;
+  std::atomic<unsigned> living_;
   std::atomic<bool> stop_;
 
-  unsigned threads_, idle_;
   Worker * workers_;
 
   friend struct Worker;
@@ -130,8 +130,10 @@ size.");
   unsigned steal_from (Worker & source, unsigned divisor);
   bool pop (task_type & task);
   unsigned push_front(std::queue<task_type> &, unsigned number);
-  bool push (task_type && tasks);
-  bool push_front (task_type && tasks);
+  template<typename Task>
+  bool push (Task && tasks);
+  template<typename Task>
+  bool push_front (Task && tasks);
   bool execute (void);
   index_type count_tasks (void) const;
   void refresh_tasks (std::queue<task_type> &, unsigned number);
@@ -232,6 +234,8 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
   if (writeable == 0)
     return 0;
 
+//  Maximum spin count before giving up.
+  uint_fast8_t spins = 64;
 //  Lock the source queue, reserving several tasks to steal.
   source_back = source.back_.load(std::memory_order_relaxed);
   do {
@@ -250,10 +254,15 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
       stolen = writeable;
     source_write = (source_valid - stolen + kModulus) % kModulus;
     //assert(get_distance(source_front, source_write) <= get_distance(source_front, source_valid));
-  } while (!source.back_.compare_exchange_weak(source_back,
-                                               make_back(source_write, source_valid),
-                                               std::memory_order_acq_rel,
-                                               std::memory_order_relaxed));
+    if (source.back_.compare_exchange_weak(source_back,
+                                           make_back(source_write, source_valid),
+                                           std::memory_order_acq_rel,
+                                           std::memory_order_relaxed))
+      break;
+//  Spun too long. Better to try a different victim than lock forever.
+    if (--spins == 0)
+      return 0;
+  } while (true);
 //    Now that the lock has been acquired, read may advance at most one more
 //  time. That is, simply ensuring that READ < WRITE will suffice to ensure
 //  correct behavior. Unfortunately, the READ may already be in the claim. Only
@@ -276,9 +285,11 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
     if ((readable > valid) || (readable == 0))
     {
       stolen = (valid + divisor - 2) / divisor;
-//    Number of valid tasks can only have been reduced since last time, so there
-//  is no reason to double-check whether dest queue can accept the tasks.
+//    Thief's number of held tasks can only be reduced since last check, so
+//  there is no reason to double-check whether thief can hold the tasks.
       source_write = (source_valid - stolen + kModulus) % kModulus;
+//    This store is optional. It allows the victim queue to keep executing
+//  while memory is copied.
       source.back_.store(make_back(source_write, source_valid),
                          std::memory_order_relaxed);
     }
@@ -289,7 +300,6 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
   source_front = source.front_.load(std::memory_order_relaxed);
   assert(get_distance(source_front, source_write) <= get_distance(source_front, source_valid));
 #endif
-
   assert(source_write != source_valid);
   do {
     source_valid = (source_valid - 1 + kModulus) % kModulus;
@@ -389,7 +399,10 @@ void Worker::refresh_tasks (std::queue<task_type> & tasks, unsigned number)
 //    Pushes a task onto the back of the queue, if possible. If the back of the
 //  queue is in contention, (eg. because of work stealing), pushes onto the
 //  front of the queue instead.
-bool Worker::push (task_type && task)
+//    Note: Only evaluates the task reference if there is room to insert the
+//  task.
+template<typename Task>
+bool Worker::push (Task && task)
 {
 //  Worker::push may only be called from the Worker's owned thread.
   assert(std::this_thread::get_id() == thread_.get_id());
@@ -412,17 +425,17 @@ bool Worker::push (task_type && task)
                                     std::memory_order_relaxed))
   {
     assert(tasks_[write] == nullptr);
-    tasks_[write] = std::move(task);
+    tasks_[write] = std::forward<Task>(task);
     back_.store(make_back(new_back), std::memory_order_release);
   }
   else
   {
-    index_type write = front;
+    write = front;
     front = (front - 1 + kModulus) % kModulus;
     if (!front_invalid_)
       write = front;
     assert(tasks_[write] == nullptr);
-    tasks_[write] = std::move(task);
+    tasks_[write] = std::forward<Task>(task);
     front_.store(front, std::memory_order_release);
   }
   return true;
@@ -430,7 +443,10 @@ bool Worker::push (task_type && task)
 
 //    Places a new task at the front of the queue. Note that this skirts anti-
 //  starvation precautions.
-bool Worker::push_front (task_type && task)
+//    Note: Only evaluates the task reference if there is room to insert the
+//  task.
+template<typename Task>
+bool Worker::push_front (Task && task)
 {
   index_type front, back;
 
@@ -447,7 +463,7 @@ bool Worker::push_front (task_type && task)
   if (!front_invalid_)
     write = front;
   assert(tasks_[write] == nullptr);
-  tasks_[write] = std::move(task);
+  tasks_[write] = std::forward<Task>(task);
   front_.store(front, std::memory_order_release);
   return true;
 }
@@ -530,38 +546,55 @@ unsigned Worker::steal (void)
 //  Sleeps if no work is available in this and other queues.
 void Worker::operator() (void)
 {
+  static constexpr size_t kPullFromQueue = (kModulus + 31) / 32;
   index_type last_size = 0;
 //    This thread-local variable allows O(1) scheduling (allows pushing directly
 //  to the local task queue).
   current_worker = this;
+  pool_.living_.fetch_add(1, std::memory_order_relaxed);
+  {
+    std::unique_lock<decltype(pool_.mutex_)> guard(pool_.mutex_);
+    pool_.cv_.notify_all();
+    ++pool_.idle_;
+    ThreadPoolImpl * ptr = &pool_;
+    pool_.cv_.wait(guard, [ptr] (void) -> bool {
+      return (ptr->living_.load(std::memory_order_relaxed) == ptr->threads_) &&
+              !ptr->stop_.load(std::memory_order_relaxed);
+    });
+    --pool_.idle_;
+  }
   while (true)
   {
     if (--countdown_ == 0)
     {
-//    Periodically check whether the program is trying to destroy the pool.
-      if (pool_.stop_.load(std::memory_order_relaxed))
-        return;
       typedef decltype(pool_.mutex_) mutex_type;
       mutex_type & mutex = pool_.mutex_;
 
       index_type size = count_tasks();
+      if (size > ThreadPool::kWorkerQueueSize)
+        size = ThreadPool::kWorkerQueueSize;
       countdown_ = size + 2;
-      if (pool_.queue_.empty())
-      {
-//    If the queue size has stabilized, it's likely that all tasks are waiting
-//  on something (and thus continually re-adding themselves). Shake things up a
-//  bit by re-shuffling tasks.
-        if (size == last_size)
-          size += steal();
-        last_size = size;
-        continue;
-      }
+
+//    Periodically check whether the program is trying to destroy the pool.
+      if (pool_.stop_.load(std::memory_order_relaxed))
+        goto kill;
+
       if (mutex.try_lock())
       {
         std::lock_guard<mutex_type> guard (mutex, std::adopt_lock);
-        if (!pool_.queue_.empty())
-          refresh_tasks(pool_.queue_, 32);
-        countdown_ += 32;
+        if (pool_.queue_.empty())
+        {
+//    If the queue size has stabilized, it's likely that all tasks are waiting
+//  on something (and thus continually re-adding themselves). Shake things up a
+//  bit by re-shuffling tasks.
+          if (size == last_size)
+            size += steal();
+          last_size = size;
+          continue;
+        }
+        //if (!pool_.queue_.empty())
+        refresh_tasks(pool_.queue_, (kPullFromQueue + 3) / 4);
+        countdown_ += kPullFromQueue / 2;
       }
       else
       {
@@ -574,23 +607,31 @@ void Worker::operator() (void)
 //    Second, check for (and perform) any tasks in this thread's queue.
     if (execute())
       continue;
+//  Make sure we don't exhaust the full queue when an exit is desired.
+    if (pool_.stop_.load(std::memory_order_acquire))
+      goto kill;
 //    Third, check whether there are common tasks available. This will also
 //  serve to jump-start the worker.
-    unsigned count = 0;
     typedef decltype(pool_.mutex_) mutex_type;
     mutex_type & mutex = pool_.mutex_;
     decltype(pool_.queue_) & queue = pool_.queue_;
+//    Testing whether the task queue is empty may give an incorrect result,
+//  due to lack of synchronization, but is still a fast and easy test.
     if ((!queue.empty()) && mutex.try_lock())
     {
       std::lock_guard<mutex_type> guard (mutex, std::adopt_lock);
-      count += push_front(queue, 32);
+      unsigned count = push_front(queue, kPullFromQueue);
+      if (count > 0)
+      {
+//  If our new tasks are already from the queue, no need to refresh.
+        countdown_ += kPullFromQueue;//count;
+        continue;
+      }
     }
-    if (count > 0)
-      continue;
 //    Fourth, try work stealing.
-    count += steal();
-    if (count > 0)
+    if (steal() > 0)
       continue;
+
 //  Fifth, wait a bit for something to change...
     size_t num_threads = pool_.get_concurrency();
     bool should_idle = (count_tasks() == 0);
@@ -599,50 +640,59 @@ void Worker::operator() (void)
       Worker * victim = pool_.workers_ + n;
       should_idle = (victim->count_tasks() < 2);
     }
-    if (should_idle)
+    if (should_idle && mutex.try_lock())
     {
-      std::unique_lock<mutex_type> guard (mutex);
+      std::unique_lock<mutex_type> guard (mutex, std::adopt_lock);
+      if (pool_.stop_.load(std::memory_order_acquire))
+        goto kill;
       if (queue.empty())
       {
-        if (pool_.stop_.load(std::memory_order_relaxed))
-          return;
         ++pool_.idle_;
         pool_.cv_.wait(guard);
         --pool_.idle_;
-        if (pool_.stop_.load(std::memory_order_relaxed))
-          return;
+        if (pool_.stop_.load(std::memory_order_acquire))
+          goto kill;
       }
-      push_front(queue, 32);
+//  If our new tasks are already from the queue, no need to refresh.
+      push_front(queue, kPullFromQueue);
+      countdown_ += kPullFromQueue;
     }
     else
       std::this_thread::yield();
   }
+kill:
+  current_worker = nullptr;
+  pool_.living_.fetch_sub(1, std::memory_order_acq_rel);
 }
-
-
-
-
-
-
 
 
 
 ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
-  : mutex_(), cv_(), queue_(), stop_(false),
-    threads_(threads), idle_(0),
+  : mutex_(), cv_(), queue_(),
+    idle_(0), threads_(threads),
+    living_(0), stop_(false),
     workers_(workers)
 {
+  {
+  //std::lock_guard<decltype(mutex_)> guard (mutex_);
   for (unsigned i = 0; i < threads_; ++i)
     new(workers + i) Worker(*this);
+  }
+//  Wait for the pool to be fully populated to ensure no weird behaviors.
+  while (living_.load(std::memory_order_acquire) != threads_)
+    std::this_thread::yield();
 }
 
 ThreadPoolImpl::~ThreadPoolImpl (void)
 {
+  stop_.store(true, std::memory_order_release);
+//    Wake all worker threads. Do so while holding the lock to ensure that all
+//  potentially-idling threads are woken.
   {
     std::lock_guard<decltype(mutex_)> guard (mutex_);
-    stop_.store(true, std::memory_order_relaxed);
+    if (idle_ > 0)
+      cv_.notify_all();
   }
-  cv_.notify_all();
   for (unsigned i = 0; i < threads_; ++i)
     workers_[i].kill_thread();
   for (unsigned i = 0; i < threads_; ++i)
@@ -654,13 +704,15 @@ unsigned ThreadPoolImpl::get_concurrency(void) const
   return threads_;
 }
 
-void ThreadPoolImpl::schedule_overflow (task_type && task)
+template<typename Task>
+void ThreadPoolImpl::schedule_overflow (Task && task)
 {
   {
     std::lock_guard<decltype(mutex_)> guard (mutex_);
-    queue_.emplace(std::move(task));
+    queue_.emplace(std::forward<Task>(task));
   }
-  cv_.notify_one();
+  if (idle_ > 0)
+    cv_.notify_one();
 }
 
 } //  Namespace [Anonymous]
@@ -676,41 +728,46 @@ bool ThreadPool::is_idle (void) const
   return impl->idle_ == impl->threads_;
 }
 
-#ifndef NDEBUG
 namespace {
-  std::atomic_flag overflow_warning_given = ATOMIC_FLAG_INIT;
+#ifndef NDEBUG
+std::atomic_flag overflow_warning_given = ATOMIC_FLAG_INIT;
+void debug_warn_overflow (void)
+{
+  if (!overflow_warning_given.test_and_set())
+    std::printf("Task queue overflow (more than %u tasks in a single worker's queue). May impact performance.", unsigned(ThreadPool::kWorkerQueueSize));
 }
+#else
+inline void debug_warn_overflow (void) { }
 #endif
 
-//  Schedules a task normally, at the back of the queue.
-void ThreadPool::schedule (task_type && task)
+template<typename Task>
+void impl_schedule (Task && task, ThreadPoolImpl * impl)
 {
   Worker * worker = current_worker;
 //  If a thread is attempting to schedule in its own pool...
-  if ((worker != nullptr) && (&(worker->pool_) == impl_))
+  if ((worker != nullptr) && (&(worker->pool_) == impl))
   {
-    if (worker->push(std::move(task)))
+    if (worker->push(std::forward<Task>(task)))
     {
       if (worker->pool_.idle_ > 0)
         worker->pool_.cv_.notify_one();
       return;
     }
-#ifndef NDEBUG
-    else if (!overflow_warning_given.test_and_set())
-      std::cerr << "Task queue overflow. May impact performance." << std::endl;
-#endif
+    else
+      debug_warn_overflow();
   }
-  static_cast<ThreadPoolImpl*>(impl_)->schedule_overflow(std::move(task));
+  impl->schedule_overflow<Task>(std::forward<Task>(task));
 }
 
 //  Schedule at the front of the queue, if in fast path.
-void ThreadPool::schedule_subtask (task_type && task)
+template<typename Task>
+void impl_schedule_subtask (Task && task, ThreadPoolImpl * impl)
 {
   Worker * worker = current_worker;
 //  If a thread is attempting to schedule in its own pool, take the fast path.
-  if ((worker != nullptr) && (&(worker->pool_) == impl_))
+  if ((worker != nullptr) && (&(worker->pool_) == impl))
   {
-    if (worker->push_front(std::move(task)))
+    if (worker->push_front(std::forward<Task>(task)))
     {
 //    Delay lower-level (central) queue from being accessed, to fully support
 //  depth-first traversal of task tree.
@@ -720,12 +777,31 @@ void ThreadPool::schedule_subtask (task_type && task)
         worker->pool_.cv_.notify_one();
       return;
     }
-#ifndef NDEBUG
-    else if (!overflow_warning_given.test_and_set())
-      std::cerr << "Task queue overflow. May impact performance." << std::endl;
-#endif
+    else
+      debug_warn_overflow();
   }
-  static_cast<ThreadPoolImpl*>(impl_)->schedule_overflow(std::move(task));
+  impl->schedule_overflow(std::forward<Task>(task));
+}
+}
+
+//  Schedules a task normally, at the back of the queue.
+void ThreadPool::schedule (const task_type & task)
+{
+  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+void ThreadPool::schedule (task_type && task)
+{
+  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+
+//  Schedule at the front of the queue, if in fast path.
+void ThreadPool::schedule_subtask (const task_type & task)
+{
+  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+void ThreadPool::schedule_subtask (task_type && task)
+{
+  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
 }
 
 ThreadPool::ThreadPool (unsigned threads)
@@ -740,28 +816,33 @@ ThreadPool::ThreadPool (unsigned threads)
   }
   size_t space = sizeof(ThreadPoolImpl) + threads * sizeof(Worker) +           \
                  alignof(ThreadPoolImpl) + alignof(Worker) + sizeof(void**);
-  void * memory = malloc(space);
+  void * memory = std::malloc(space);
   if (memory == nullptr)
     goto fail_l1;
   {
     using std::align;
     void * ptr = memory;
-    if (!align(alignof(ThreadPoolImpl), sizeof(ThreadPoolImpl), ptr, space))
-      goto fail_l2;
-    impl_ = ptr;
-    ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
-    ptr = impl + 1;
+
+//  Allocate space for a block of worker threads
     if (!align(alignof(Worker), threads * sizeof(Worker), ptr, space))
       goto fail_l2;
     Worker * workers = static_cast<Worker*>(ptr);
+    ptr = workers + threads;
+
+//  Allocate space for the controller.
+    if (!align(alignof(ThreadPoolImpl), sizeof(ThreadPoolImpl), ptr, space))
+      goto fail_l2;
+    ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(ptr);
+    ptr = impl + 1;
+
+    impl_ = impl;
     new(impl) ThreadPoolImpl(workers, threads);
 
-    //std::cerr << "Storing " << memory_ << "\n";
-    *reinterpret_cast<void**>(workers + threads) = memory;
+    *reinterpret_cast<void**>(ptr) = memory;
   }
   return;
 fail_l2:
-  free(memory);
+  std::free(memory);
 fail_l1:
   throw std::bad_alloc();
 }
@@ -771,5 +852,5 @@ ThreadPool::~ThreadPool (void)
   ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
   void * memory = *reinterpret_cast<void**>(impl->workers_ + impl->threads_);
   impl->~ThreadPoolImpl();
-  free(memory);
+  std::free(memory);
 }
