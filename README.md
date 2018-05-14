@@ -16,7 +16,12 @@ Either compile thread_pool.cpp as part of your project, or [compile it as a stat
 
 ### Using the library
 
-Full documentation for this library may be generated using Doxygen. A simple example of how to the library follows:
+The library is designed to enable a simple use pattern:
+1. Create a `ThreadPool` object.
+2. Give tasks to the pool by calling `ThreadPool.schedule(task)`.
+3. Wait for tasks to complete.
+Note that tasks can
+Full documentation for this library may be generated using  Doxygen. A simple example of how to the library follows:
 ```
 #include "thread_pool.hpp"
 
@@ -27,18 +32,18 @@ ThreadPool pool;
 pool.schedule([](void)
 {
 //  Put a task into the pool. This is called from within a worker thread, so it takes the scheduler's fast path.
-  pool.schedule([](void) { });
+  pool.schedule([](void) {
+    do_something();
+  });
  
 //  Put a task into the pool, treated as if it were part of the currently running task. This is called from within a worker thread, so it takes the scheduler's fast path.
-  pool.schedule_subtask([](void) { });
+  pool.schedule_subtask([](void) {
+    do_something();
+  });
 });
 
 //  When the thread pool is destroyed, remaining unexecuted tasks are forgotten.
 ```
-
-## Running the tests
-
-Compile tests.cpp, then link with the compiled object from thread_pool.cpp. Run the resulting executable. The test should complete some or all of the 80000000 simple tasks within the time allotted; tasks remaining in the pool when the pool is destroyed are ignored. The test will then wait for 10 seconds, to test idle performance, followed by a repeat of the previous test. As a point of interest, the test will state the minimum and maximum number of tasks executed by workers; this can be used to estimate how well the scheduler is balancing work across threads.
 
 ## Authors
 
@@ -46,4 +51,4 @@ Compile tests.cpp, then link with the compiled object from thread_pool.cpp. Run 
 
 ## License
 
-This project is licensed under the [Simplified BSD 2-Clause License](LICENSE).
+To encourage people to use this library freely and without concern, this project is licensed under the [MIT License](LICENSE).
