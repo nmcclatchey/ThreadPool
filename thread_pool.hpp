@@ -139,6 +139,11 @@ class ThreadPool
 /// placed in the <tt>ThreadPool</tt>'s task queue. Because resolving overflow
 /// requires synchronization, one should typically attempt to avoid causing a
 /// queue overflow.
+/// \par  Memory order
+///   Execution of a task *synchronizes-with* (as in `std::memory_order`) the
+/// call to `schedule()` that added it to the pool, using a *Release-Acquire*
+/// ordering.
+
   void schedule (const task_type & task);
 /// \overload
   void schedule (task_type && task);
@@ -158,6 +163,10 @@ class ThreadPool
 ///   depth-first execution --  rather than breadth-first execution -- if tasks
 ///   exhibit significant branching. This can reduce the odds of a local queue
 ///   overflow (the slow path) and reduce the memory needed for scheduled tasks.
+/// \par  Memory order
+///   Execution of a task *synchronizes-with* (as in `std::memory_order`) the
+/// call to `schedule_subtask()` that added it to the pool, using a
+/// *Release-Acquire* ordering.
 /// \warning  Because a subtask is considered as part of the task that spawned
 ///   it, no guarantees of non-starvation are made should the collective
 ///   subtasks not terminate.
