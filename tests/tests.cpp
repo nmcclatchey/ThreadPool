@@ -59,17 +59,22 @@ void gather_statistics  (uint_fast64_t & balance_min,
 
 int main()
 {
+  int test_id = 0;
   {
-    LOG("Test %u:\t%s",1,"Construct and destroy empty threadpool.");
+    LOG("Test %u:\t%s",++test_id,"Query static information");
+    LOG("\tWorker queue capacity is %llu tasks.",ThreadPool::get_worker_capacity());
+  }
+  {
+    LOG("Test %u:\t%s",++test_id,"Construct and destroy empty threadpool.");
     {
-    ThreadPool pool;
-    LOG("\t%s","Construct successful.");
+      ThreadPool pool;
+      LOG("\t%s","Construct successful.");
     }
     LOG("\t%s","Destroy successful.");
   }
   int logged_errors = 0;
   {
-    LOG("Test %u:\t%s",2,"Use threadpool for tasks.");
+    LOG("Test %u:\t%s",++test_id,"Use threadpool for tasks.");
     LOG("\t%s","Constructing a thread pool.");
     ThreadPool pool;
     LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
