@@ -1,5 +1,5 @@
 ////////////////////////////////////////////////////////////////////////////////
-/// \file thread_pool.hpp
+/// \file threadpool.hpp
 /// \brief  Lightweight, fine-grained multitasking through thread pools.
 ///
 ///   This header is part of a multi-tasking library that provides low-overhead

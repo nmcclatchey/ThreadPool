@@ -1,5 +1,5 @@
 //  Include this first to check for missed dependencies.
-#include "../thread_pool.hpp"
+#include "../threadpool.hpp"
 
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>

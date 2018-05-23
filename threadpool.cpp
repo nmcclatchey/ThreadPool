@@ -1,5 +1,5 @@
-/// \file   thread_pool.cpp
-/// \brief  Implements \ref `thread_pool.hpp`.
+/// \file   threadpool.cpp
+/// \brief  Implements \ref `threadpool.hpp`.
 /// \author Nathaniel J. McClatchey, PhD
 /// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.  \n
 ///   Licensed under the MIT license. \n
@@ -7,7 +7,7 @@
 /// \note   To compile for MinGW-w64 without linking against the winpthreads
 /// library, use the <a href=https://github.com/nmcclatchey/mingw-std-threads>
 /// MinGW Windows STD Threads library</a>.
-#include "thread_pool.hpp"
+#include "threadpool.hpp"
 
 #if !defined(__cplusplus) || (__cplusplus < 201103L)
 #error The implementation of ThreadPool requires C++11 or higher.
