@@ -1,5 +1,5 @@
-/// \file   thread_pool.cpp
-/// \brief  Implements \ref thread_pool.hpp.
+/// \file   threadpool.cpp
+/// \brief  Implements \ref `threadpool.hpp`.
 /// \author Nathaniel J. McClatchey, PhD
 /// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.  \n
 ///   Licensed under the MIT license. \n
@@ -7,7 +7,7 @@
 /// \note   To compile for MinGW-w64 without linking against the winpthreads
 /// library, use the <a href=https://github.com/nmcclatchey/mingw-std-threads>
 /// MinGW Windows STD Threads library</a>.
-#include "thread_pool.hpp"
+#include "threadpool.hpp"
 
 #if !defined(__cplusplus) || (__cplusplus < 201103L)
 #error The implementation of ThreadPool requires C++11 or higher.
@@ -52,6 +52,14 @@
 #endif
 
 namespace {
+/// \brief  Determines the capacity of each `Worker`'s queue. Larger values take
+///   more memory, but less processing power. The reverse holds for smaller
+///   values.
+/// \note Must be positive.
+constexpr std::size_t kLog2Modulus = 14;
+
+static_assert(kLog2Modulus > 0, "Worker thread capacity must be positive.");
+
 struct Worker;
 struct ThreadPoolImpl;
 
@@ -94,7 +102,7 @@ struct ThreadPoolImpl
 struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
 {
   typedef typename ThreadPool::task_type task_type;
-  ~Worker (void) =default;
+  ~Worker (void);
 
   Worker (const Worker &) = delete;
   Worker & operator= (const Worker &) = delete;
@@ -110,13 +118,11 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
 
   typedef uint_fast32_t index_type;
 
-  constexpr static size_t kModulus = ThreadPool::kWorkerQueueSize + 1;
-  constexpr static size_t kValidShift = (CHAR_BIT * sizeof(index_type)) / 2;
+  constexpr static std::size_t kModulus = 1 << kLog2Modulus;
+  constexpr static std::size_t kValidShift = CHAR_BIT * sizeof(index_type) / 2;
   constexpr static index_type kWriteMask = ~(~static_cast<index_type>(0) << kValidShift);
-  static_assert(ThreadPool::kWorkerQueueSize < (1 << kValidShift), "Thread \
-pool's local task queue size exceeds limit of selected index type.");
-  static_assert(ThreadPool::kWorkerQueueSize > 1, "Invalid worker thread queue \
-size.");
+  static_assert(kLog2Modulus <= kValidShift, "ThreadPool's local task queue \
+size exceeds limit of selected index type.");
 
   inline static constexpr index_type get_distance (index_type, index_type);
   //inline static constexpr index_type get_writeable (index_type, index_type);
@@ -137,6 +143,23 @@ size.");
   bool execute (void);
   index_type count_tasks (void) const;
   void refresh_tasks (std::queue<task_type> &, unsigned number);
+
+  template<typename Task>
+  void place_task (index_type location, Task && task)
+  {
+    task_type * task_array = reinterpret_cast<task_type *>(tasks_);
+    //assert(task_array[location] == nullptr);
+    //tasks_[location] = std::forward<Task>(task);
+    new(task_array + location) task_type(std::forward<Task>(task));
+  }
+  task_type remove_task (index_type location)
+  {
+    task_type * task_array = reinterpret_cast<task_type *>(tasks_);
+    assert(task_array[location] != nullptr);
+    task_type result = std::move(task_array[location]);
+    task_array[location].~task_type();
+    return std::move(result);
+  }
 
 //  These store information about the current state of the deque.
 //  -   front_ is modified only by the Worker's own thread. Reads and writes
@@ -166,8 +189,43 @@ size.");
 //  this, but the workaround would be less efficient.
   std::thread thread_;
 //  Task queue.
-  task_type tasks_ [kModulus];
+//  task_type tasks_ [kModulus];
+  char tasks_ [kModulus * sizeof(task_type)];
 };
+
+Worker::Worker (ThreadPoolImpl & pool)
+  : front_(0), back_(0), countdown_(2), front_invalid_(false), pool_(pool),
+    thread_(std::reference_wrapper<Worker>(*this))
+{
+}
+
+//  Only called after all workers have stopped.
+Worker::~Worker (void)
+{
+  assert(!front_invalid_);
+
+  index_type front = front_.load(std::memory_order_relaxed);
+  index_type back = back_.load(std::memory_order_relaxed);
+
+//    For safety, block stealing during this. Note: Won't block the worker that
+//  is being destroyed.
+  do {
+    back = make_back(get_valid(back), get_valid(back));
+    if (back_.compare_exchange_weak(back, make_back(1, 0),
+                                    std::memory_order_acquire,
+                                    std::memory_order_relaxed))
+     break;
+  } while (true);
+
+  back = get_valid(back);
+
+  front = front_.load(std::memory_order_acquire);
+  while (front != back) {
+    back = (back - 1 + kModulus) % kModulus;
+    remove_task(back);
+  }
+  back_.store(make_back(front,front), std::memory_order_release);
+}
 
 constexpr typename Worker::index_type Worker::get_distance (index_type left, index_type right)
 {
@@ -304,8 +362,7 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
   do {
     source_valid = (source_valid - 1 + kModulus) % kModulus;
     this_front = (this_front - 1 + kModulus) % kModulus;
-    assert(tasks_[this_front] == nullptr);
-    tasks_[this_front] = std::move(source.tasks_[source_valid]);
+    place_task(this_front, source.remove_task(source_valid));
   } while (source_valid != source_write);
 
   front_.store(this_front, std::memory_order_release);
@@ -331,7 +388,7 @@ bool Worker::pop (task_type & task)
 //  or may not be something to read.
   if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
     return false;
-  task = std::move(tasks_[front]);
+  task = remove_task(front);
 
   front_.store((front + 1) % kModulus, std::memory_order_relaxed);
 //  I need to release back_ so that the write to front_ is visible to thieves.
@@ -360,7 +417,8 @@ bool Worker::execute (void)
   if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
     return false;
 
-  task_type task = std::move(tasks_[front]);
+  task_type task = remove_task(front);
+
   assert(task != nullptr);
   front_invalid_ = true;
   task();
@@ -424,8 +482,7 @@ bool Worker::push (Task && task)
                                     std::memory_order_acquire,
                                     std::memory_order_relaxed))
   {
-    assert(tasks_[write] == nullptr);
-    tasks_[write] = std::forward<Task>(task);
+    place_task(write, std::forward<Task>(task));
     back_.store(make_back(new_back), std::memory_order_release);
   }
   else
@@ -434,8 +491,7 @@ bool Worker::push (Task && task)
     front = (front - 1 + kModulus) % kModulus;
     if (!front_invalid_)
       write = front;
-    assert(tasks_[write] == nullptr);
-    tasks_[write] = std::forward<Task>(task);
+    place_task(write, std::forward<Task>(task));
     front_.store(front, std::memory_order_release);
   }
   return true;
@@ -462,8 +518,7 @@ bool Worker::push_front (Task && task)
   front = (front - 1 + kModulus) % kModulus;
   if (!front_invalid_)
     write = front;
-  assert(tasks_[write] == nullptr);
-  tasks_[write] = std::forward<Task>(task);
+  place_task(write, std::forward<Task>(task));
   front_.store(front, std::memory_order_release);
   return true;
 }
@@ -493,9 +548,8 @@ unsigned Worker::push_front (std::queue<task_type> & tasks, unsigned number)
   n = written;
   do {
     front = (front - 1 + kModulus) % kModulus;
-    assert(tasks_[front] == nullptr);
-    tasks_[front] = std::move(tasks.front());
-    assert(tasks_[front] != nullptr);
+    assert(tasks.front() != nullptr);
+    place_task(front, std::move(tasks.front()));
     tasks.pop();
     if (tasks.empty())
     {
@@ -516,21 +570,16 @@ typename Worker::index_type Worker::count_tasks (void) const
   return get_distance(front, get_valid(back));
 }
 
-Worker::Worker (ThreadPoolImpl & pool)
-  : front_(0), back_(0), countdown_(2), front_invalid_(false), pool_(pool),
-    thread_(std::reference_wrapper<Worker>(*this))
-{
-}
-
 //  Attempts to steal work from other worker threads in the same pool.
 unsigned Worker::steal (void)
 {
   //return 0;
+  unsigned source = front_.load(std::memory_order_relaxed);
   std::hash<typename std::thread::id> hasher;
-  size_t source = hasher(thread_.get_id()) + front_.load(std::memory_order_relaxed);// + time(nullptr);
-  size_t num_threads = pool_.get_concurrency();
+  source += hasher(thread_.get_id());
+  auto num_threads = pool_.get_concurrency();
   unsigned count = 0;
-  for (size_t n = num_threads; n; --n) {
+  for (auto n = num_threads; n--;) {
     source = (source + 1) % num_threads;
     Worker * victim = pool_.workers_ + source;
     if (victim == this)
@@ -546,7 +595,7 @@ unsigned Worker::steal (void)
 //  Sleeps if no work is available in this and other queues.
 void Worker::operator() (void)
 {
-  static constexpr size_t kPullFromQueue = (kModulus + 31) / 32;
+  static constexpr std::size_t kPullFromQueue = (kModulus + 31) / 32;
   index_type last_size = 0;
 //    This thread-local variable allows O(1) scheduling (allows pushing directly
 //  to the local task queue).
@@ -571,8 +620,8 @@ void Worker::operator() (void)
       mutex_type & mutex = pool_.mutex_;
 
       index_type size = count_tasks();
-      if (size > ThreadPool::kWorkerQueueSize)
-        size = ThreadPool::kWorkerQueueSize;
+      if (size >= kModulus)
+        size = kModulus - 1;
       countdown_ = size + 2;
 
 //    Periodically check whether the program is trying to destroy the pool.
@@ -633,9 +682,9 @@ void Worker::operator() (void)
       continue;
 
 //  Fifth, wait a bit for something to change...
-    size_t num_threads = pool_.get_concurrency();
+    auto num_threads = pool_.get_concurrency();
     bool should_idle = (count_tasks() == 0);
-    for (size_t n = num_threads; n-- && should_idle;)
+    for (auto n = num_threads; n-- && should_idle;)
     {
       Worker * victim = pool_.workers_ + n;
       should_idle = (victim->count_tasks() < 2);
@@ -650,7 +699,7 @@ void Worker::operator() (void)
         ++pool_.idle_;
         pool_.cv_.wait(guard);
         --pool_.idle_;
-        if (pool_.stop_.load(std::memory_order_acquire))
+        if (pool_.stop_.load(std::memory_order_relaxed))
           goto kill;
       }
 //  If our new tasks are already from the queue, no need to refresh.
@@ -707,10 +756,8 @@ unsigned ThreadPoolImpl::get_concurrency(void) const
 template<typename Task>
 void ThreadPoolImpl::schedule_overflow (Task && task)
 {
-  {
-    std::lock_guard<decltype(mutex_)> guard (mutex_);
-    queue_.emplace(std::forward<Task>(task));
-  }
+  std::lock_guard<decltype(mutex_)> guard (mutex_);
+  queue_.emplace(std::forward<Task>(task));
   if (idle_ > 0)
     cv_.notify_one();
 }
@@ -724,8 +771,9 @@ unsigned ThreadPool::get_concurrency(void) const
 
 bool ThreadPool::is_idle (void) const
 {
-  const ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
-  return impl->idle_ == impl->threads_;
+  ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
+  std::lock_guard<decltype(impl->mutex_)> guard (impl->mutex_);
+  return impl->idle_ > 0;
 }
 
 namespace {
@@ -734,7 +782,8 @@ std::atomic_flag overflow_warning_given = ATOMIC_FLAG_INIT;
 void debug_warn_overflow (void)
 {
   if (!overflow_warning_given.test_and_set())
-    std::printf("Task queue overflow (more than %u tasks in a single worker's queue). May impact performance.", unsigned(ThreadPool::kWorkerQueueSize));
+    std::printf("Task queue overflow (more than %llu tasks in a single worker's \
+queue). May impact performance.", ThreadPool::get_worker_capacity());
 }
 #else
 inline void debug_warn_overflow (void) { }
@@ -749,6 +798,7 @@ void impl_schedule (Task && task, ThreadPoolImpl * impl)
   {
     if (worker->push(std::forward<Task>(task)))
     {
+//  Note: Can't allow all threads to idle, because this thread is still working.
       if (worker->pool_.idle_ > 0)
         worker->pool_.cv_.notify_one();
       return;
@@ -772,7 +822,7 @@ void impl_schedule_subtask (Task && task, ThreadPoolImpl * impl)
 //    Delay lower-level (central) queue from being accessed, to fully support
 //  depth-first traversal of task tree.
       ++worker->countdown_;
-//  Wake up the rest of the pool, if necessary.
+//  Note: Can't allow all threads to idle, because this thread is still working.
       if (worker->pool_.idle_ > 0)
         worker->pool_.cv_.notify_one();
       return;
@@ -804,6 +854,11 @@ void ThreadPool::schedule_subtask (task_type && task)
   impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
 }
 
+std::size_t ThreadPool::get_worker_capacity (void)
+{
+  return Worker::kModulus - 1;
+}
+
 ThreadPool::ThreadPool (unsigned threads)
   : impl_(nullptr)
 {
@@ -814,7 +869,7 @@ ThreadPool::ThreadPool (unsigned threads)
     if (threads < 2)
       threads = 2;
   }
-  size_t space = sizeof(ThreadPoolImpl) + threads * sizeof(Worker) +           \
+  std::size_t space = sizeof(ThreadPoolImpl) + threads * sizeof(Worker) +      \
                  alignof(ThreadPoolImpl) + alignof(Worker) + sizeof(void**);
   void * memory = std::malloc(space);
   if (memory == nullptr)
