@@ -20,6 +20,7 @@ The library is designed to enable a simple use pattern:
 1. Create a `ThreadPool` object.
 2. Give tasks to the pool by calling the pool's `schedule()`, `schedule_subtask()`, or `schedule_after()` methods.
 3. Wait for tasks to complete.
+
 Full documentation for this library may be generated using  Doxygen.
 
 A simple example of how to the library follows:
