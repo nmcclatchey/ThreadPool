@@ -85,12 +85,12 @@ int main()
         executed_tasks[i].store(0, std::memory_order_release);
       bool already_idling = false;
 
-      LOG("\t%s","Scheduling some tasks...");
+      LOG("\tScheduling some %s tasks...", (nn == 0) ? "immediate" : "delayed");
       pool.schedule([&](void)
       {
         for (unsigned i = 0; i < kTestRootTasks; ++i)
         {
-          pool.schedule([&](void)
+          pool.schedule_after(std::chrono::seconds(nn), [&](void)
           {
             for (unsigned j = 0; j < kTestBranchFactor; ++j)
             {
@@ -114,10 +114,10 @@ int main()
         uint_fast64_t balance_min, balance_max, balance_total;
         gather_statistics(balance_min, balance_max, balance_total);
         LOG("\t\tCompleted %llu / %llu tasks so far.", balance_total, kTestTotalTasks);
-        if (pool.is_idle())
+        if (pool.is_idle() && (balance_total == kTestTotalTasks))
         {
           gather_statistics(balance_min, balance_max, balance_total);
-          LOG("\tPool has idled, as expected (%llu / %llu tasks complete.", balance_total, kTestTotalTasks);
+          LOG("\tPool has idled, as expected, with all %llu tasks complete.", kTestTotalTasks);
           LOG("\tProcessor utilization [min / mean / max]:\t%llu / %llu / %llu", balance_min, balance_total / pool.get_concurrency(), balance_max);
           break;
         }

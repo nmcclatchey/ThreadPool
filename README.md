@@ -18,10 +18,11 @@ Either compile thread_pool.cpp as part of your project, or [compile it as a stat
 
 The library is designed to enable a simple use pattern:
 1. Create a `ThreadPool` object.
-2. Give tasks to the pool by calling `ThreadPool.schedule(task)`.
+2. Give tasks to the pool by calling the pool's `schedule()`, `schedule_subtask()`, or `schedule_after()` methods.
 3. Wait for tasks to complete.
-Note that tasks can
-Full documentation for this library may be generated using  Doxygen. A simple example of how to the library follows:
+Full documentation for this library may be generated using  Doxygen.
+
+A simple example of how to the library follows:
 ```
 #include "thread_pool.hpp"
 
@@ -38,6 +39,13 @@ pool.schedule([](void)
  
 //  Put a task into the pool, treated as if it were part of the currently running task. This is called from within a worker thread, so it takes the scheduler's fast path.
   pool.schedule_subtask([](void) {
+    do_something();
+  });
+
+//  Put a task into the pool, to be executed 2 seconds after it is scheduled.
+  using namespace std::chrono;
+  pool.schedule_after(seconds(2),
+  [](void) {
     do_something();
   });
 });
