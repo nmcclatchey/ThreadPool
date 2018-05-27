@@ -689,8 +689,8 @@ void Worker::operator() (void)
     ++pool_.idle_;
     ThreadPoolImpl * ptr = &pool_;
     pool_.cv_.wait(guard, [ptr] (void) -> bool {
-      return (ptr->living_.load(std::memory_order_relaxed) == ptr->threads_) &&
-              !ptr->stop_.load(std::memory_order_relaxed);
+      return (ptr->living_.load(std::memory_order_relaxed) == ptr->threads_) ||
+              ptr->stop_.load(std::memory_order_relaxed);
     });
     --pool_.idle_;
   }
@@ -806,14 +806,16 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
     living_(0), stop_(false),
     workers_(workers)
 {
-  {
-  //std::lock_guard<decltype(mutex_)> guard (mutex_);
   for (unsigned i = 0; i < threads_; ++i)
     new(workers + i) Worker(*this);
-  }
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
-  while (living_.load(std::memory_order_acquire) != threads_)
-    std::this_thread::yield();
+  {
+    std::unique_lock<decltype(mutex_)> guard (mutex_);
+    cv_.wait(guard, [this](void)->bool {
+      return (living_.load(std::memory_order_relaxed) == threads_) ||          \
+             stop_.load(std::memory_order_relaxed);
+    });
+  }
 }
 
 ThreadPoolImpl::~ThreadPoolImpl (void)
