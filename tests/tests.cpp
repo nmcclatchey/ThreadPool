@@ -3,8 +3,12 @@
 
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #else
 #include <mingw.thread.h>
+#include <mingw.mutex.h>
+#include <mingw.condition_variable.h>
 #endif
 #include <cassert>
 #include <cstdio>
@@ -38,6 +42,20 @@ void perform_task (void)
     task_slot_local = executed_tasks + (n * 64 / sizeof(*executed_tasks));
   }
   task_slot_local->fetch_add(1, std::memory_order_release);
+}
+
+std::condition_variable cv;
+std::mutex mtx;
+
+bool one_is_active = false;
+void stay_active (ThreadPool & pool)
+{
+  {
+    std::lock_guard<decltype(mtx)> lk (mtx);
+    one_is_active = true;
+    cv.notify_all();
+  }
+  pool.schedule([&pool](void){ stay_active(pool); });
 }
 
 void gather_statistics  (uint_fast64_t & balance_min,
@@ -139,6 +157,22 @@ int main()
     }
     LOG("\t%s", "Destroying the thread pool.");
   }
+
+  {
+    LOG("Test %u:\t%s",++test_id,"Destroy a ThreadPool with running task-chains.");
+    LOG("\t%s","Constructing a thread pool.");
+    ThreadPool pool (2);
+    LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
+    LOG("\t%s", "Scheduling several undying tasks...");
+    std::unique_lock<decltype(mtx)> guard (mtx);
+    one_is_active = false;
+    for (unsigned n = 0; n < 16; ++n)
+      pool.schedule([&pool](void) { stay_active(pool); });
+    cv.wait(guard, [](void)->bool { return one_is_active; });
+    LOG("\t\t%s","Done. Tasks are running.");
+    LOG("\t%s", "Destroying the thread pool.");
+  }
+
   LOG("%s", "Exiting...");
   return logged_errors;
 }

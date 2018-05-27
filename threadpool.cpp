@@ -1,8 +1,8 @@
 /// \file   threadpool.cpp
 /// \brief  Implements \ref `threadpool.hpp`.
 /// \author Nathaniel J. McClatchey, PhD
-/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.  \n
-///   Licensed under the MIT license. \n
+/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
+///   Licensed under the MIT license.                                         \n
 ///   You should have received a copy of the license with this software.
 /// \note   To compile for MinGW-w64 without linking against the winpthreads
 /// library, use the <a href=https://github.com/nmcclatchey/mingw-std-threads>
@@ -35,12 +35,9 @@
 
 #include <cassert>            //  For debugging: Fail deadly.
 #ifndef NDEBUG
-#include <cstdio>           //  For debugging: Warn on task queue overflow.
+#include <cstdio>             //  For debugging: Warn on task queue overflow.
 #endif
 
-/*#if (__cplusplus >= 201703L)
-#include <new>                //  For alignment purposes.
-#endif*/
 #ifndef THREAD_POOL_FALSE_SHARING_ALIGNMENT
 #if false && (__cplusplus >= 201703L)
 //  Note: Not yet in GCC.
@@ -52,6 +49,10 @@
 #endif
 
 namespace {
+//  Forward-declarations
+struct Worker;
+struct ThreadPoolImpl;
+
 /// \brief  Determines the capacity of each `Worker`'s queue. Larger values take
 ///   more memory, but less processing power. The reverse holds for smaller
 ///   values.
@@ -62,9 +63,9 @@ static_assert(kLog2Modulus > 0, "Worker thread capacity must be positive.");
 
 constexpr std::size_t kModulus = 1 << kLog2Modulus;
 
-struct Worker;
-struct ThreadPoolImpl;
-
+/// \brief  Provides O(1) access to the Worker that is handling the current
+///   function (if any). Used to provide a fast path for scheduling within the
+///   ThreadPool.
 thread_local Worker * current_worker = nullptr;
 
 struct ThreadPoolImpl
@@ -115,6 +116,11 @@ struct ThreadPoolImpl
     return !queue_.empty();
   }
 //  Note: Does no synchronization of its own.
+  std::size_t size (void) const
+  {
+    return queue_.size();
+  }
+//  Note: Does no synchronization of its own.
   void update_tasks (void)
   {
     while ((!time_queue_.empty()) && (clock::now() >= time_queue_.top().first))
@@ -161,7 +167,6 @@ struct ThreadPoolImpl
   Worker * workers_;
 
   friend struct Worker;
-  //friend struct ::ThreadPool;
 };
 
 //  Notes:
@@ -237,6 +242,9 @@ size exceeds limit of selected index type.");
     return std::move(result);
   }
 
+  template<typename Func>
+  void remove_all_and (Func && func);
+
 //  These store information about the current state of the deque.
 //  -   front_ is modified only by the Worker's own thread. Reads and writes
 //    must be atomic, however, to avoid torn writes.
@@ -275,13 +283,11 @@ Worker::Worker (ThreadPoolImpl & pool)
 {
 }
 
-//  Only called after all workers have stopped.
-Worker::~Worker (void)
+//    Removes each task from a Worker and applies func to it. Note: Must
+//  not be called before the Worker's thread is fully stopped.
+template<typename Func>
+void Worker::remove_all_and (Func && func)
 {
-//    If this assert fails, either synchronization wasn't performed, or a task
-//  is actively running. Either way, the code would need a fix.
-  assert(!front_invalid_);
-
   index_type front = front_.load(std::memory_order_relaxed);
   index_type back = back_.load(std::memory_order_relaxed);
 
@@ -295,14 +301,28 @@ Worker::~Worker (void)
      break;
   } while (true);
 
+//  If the worker is running a task, something is VERY wrong.
+  assert(!front_invalid_);
+
   back = get_valid(back);
 
   front = front_.load(std::memory_order_acquire);
   while (front != back) {
     back = (back - 1 + kModulus) % kModulus;
-    remove_task(back);
+    std::forward<Func>(func)(remove_task(back));
   }
   back_.store(make_back(front,front), std::memory_order_release);
+}
+
+//  Only called after all workers have stopped.
+Worker::~Worker (void)
+{
+//    If this assert fails, either synchronization wasn't performed, or a task
+//  is actively running. Either way, the code would need a fix.
+  assert(!front_invalid_);
+
+//    Remove tasks without using them in any way.
+  remove_all_and([](task_type&&){});
 }
 
 constexpr typename Worker::index_type Worker::get_distance (index_type left, index_type right)
@@ -389,7 +409,7 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
     if (writeable < stolen)
       stolen = writeable;
     source_write = (source_valid - stolen + kModulus) % kModulus;
-    //assert(get_distance(source_front, source_write) <= get_distance(source_front, source_valid));
+
     if (source.back_.compare_exchange_weak(source_back,
                                            make_back(source_write, source_valid),
                                            std::memory_order_acq_rel,
@@ -405,7 +425,6 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
 //  READ <= VALID is certain until we enforce it.
 //    Note that by including the one-increment error margin, the following
 //  adjustment needs to be run at most once.
-  //std::atomic_thread_fence(std::memory_order_acquire);
   {
     source_front = source.front_.load(std::memory_order_acquire);
     index_type valid = get_distance(source_front, source_valid);
@@ -436,7 +455,6 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
   source_front = source.front_.load(std::memory_order_relaxed);
   assert(get_distance(source_front, source_write) <= get_distance(source_front, source_valid));
 #endif
-  assert(source_write != source_valid);
   do {
     source_valid = (source_valid - 1 + kModulus) % kModulus;
     this_front = (this_front - 1 + kModulus) % kModulus;
@@ -518,14 +536,13 @@ void Worker::refresh_tasks (ThreadPoolImpl & tasks, unsigned number)
   unsigned pushed = push_front(tasks, number);
   if (pushed == 0)
   {
+    auto cnt = tasks.size();
+    if (number > cnt)
+      number = cnt;
     task_type task;
 
-    while (tasks.has_task() && pop(task))
-    {
+    for (; number && pop(task); ++pushed, --number)
       tasks.push(std::move(task));
-      ++pushed;
-      --number;
-    }
     push_front(tasks, pushed);
   }
 }
@@ -766,7 +783,7 @@ void Worker::operator() (void)
 //  Fifth, wait a bit for something to change...
     auto num_threads = pool_.get_concurrency();
     bool should_idle = (count_tasks() == 0);
-    for (auto n = num_threads; n-- && should_idle;)
+    for (auto n = num_threads; n && should_idle; --n)
     {
       Worker * victim = pool_.workers_ + n;
       should_idle = (victim->count_tasks() < 2);
