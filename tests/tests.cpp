@@ -48,11 +48,15 @@ std::condition_variable cv;
 std::mutex mtx;
 
 bool one_is_active = false;
+size_t alive_count = 0;
 void stay_active (ThreadPool & pool)
 {
   {
     std::lock_guard<decltype(mtx)> lk (mtx);
     one_is_active = true;
+    /*++alive_count;
+    if ((alive_count & (alive_count + 1)) == 0)
+      std::printf("Alive, %llu\n", alive_count);*/
     cv.notify_all();
   }
   pool.schedule([&pool](void){ stay_active(pool); });
@@ -164,11 +168,13 @@ int main()
     ThreadPool pool (2);
     LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
     LOG("\t%s", "Scheduling several undying tasks...");
-    std::unique_lock<decltype(mtx)> guard (mtx);
-    one_is_active = false;
-    for (unsigned n = 0; n < 16; ++n)
-      pool.schedule([&pool](void) { stay_active(pool); });
-    cv.wait(guard, [](void)->bool { return one_is_active; });
+    {
+      std::unique_lock<decltype(mtx)> guard (mtx);
+      one_is_active = false;
+      for (unsigned n = 0; n < 16; ++n)
+        pool.schedule([&pool](void) { stay_active(pool); });
+      cv.wait(guard, [](void)->bool { return one_is_active; });
+    }
     LOG("\t\t%s","Done. Tasks are running.");
     LOG("\t%s", "Destroying the thread pool.");
   }
