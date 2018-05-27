@@ -713,7 +713,8 @@ void Worker::operator() (void)
       if (mutex.try_lock())
       {
         std::lock_guard<mutex_type> guard (mutex, std::adopt_lock);
-        if (pool_.has_task())
+        pool_.update_tasks();
+        if (!pool_.has_task())
         {
 //    If the queue size has stabilized, it's likely that all tasks are waiting
 //  on something (and thus continually re-adding themselves). Shake things up a
@@ -723,7 +724,6 @@ void Worker::operator() (void)
           last_size = size;
           continue;
         }
-        //if (!pool_.queue_.empty())
         refresh_tasks(pool_, (kPullFromQueue + 3) / 4);
         countdown_ += kPullFromQueue / 2;
       }
@@ -745,7 +745,6 @@ void Worker::operator() (void)
 //  serve to jump-start the worker.
     typedef decltype(pool_.mutex_) mutex_type;
     mutex_type & mutex = pool_.mutex_;
-    //decltype(pool_.queue_) & queue = pool_.queue_;
 //    Testing whether the task queue is empty may give an incorrect result,
 //  due to lack of synchronization, but is still a fast and easy test.
     if (pool_.might_have_task() && mutex.try_lock())
@@ -787,8 +786,8 @@ void Worker::operator() (void)
           goto kill;
         pool_.update_tasks();
       }
-//  If our new tasks are already from the queue, no need to refresh.
       push_front(pool_, kPullFromQueue);
+//  If our new tasks are already from the queue, no need to refresh.
       countdown_ += kPullFromQueue;
     }
     else
