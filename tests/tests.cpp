@@ -3,8 +3,12 @@
 
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>
+#include <mutex>
+#include <condition_variable>
 #else
 #include <mingw.thread.h>
+#include <mingw.mutex.h>
+#include <mingw.condition_variable.h>
 #endif
 #include <cassert>
 #include <cstdio>
@@ -24,6 +28,7 @@ void perform_task (void);
 void gather_statistics  (uint_fast64_t & balance_min,
                          uint_fast64_t & balance_max,
                          uint_fast64_t & balance_total);
+void stay_active (ThreadPool &);
 
 thread_local std::atomic<uint_fast64_t> * task_slot_local = nullptr;
 std::atomic<uint_fast32_t> task_slot_next(0);
@@ -38,6 +43,24 @@ void perform_task (void)
     task_slot_local = executed_tasks + (n * 64 / sizeof(*executed_tasks));
   }
   task_slot_local->fetch_add(1, std::memory_order_release);
+}
+
+std::condition_variable cv;
+std::mutex mtx;
+
+bool one_is_active = false;
+size_t alive_count = 0;
+void stay_active (ThreadPool & pool)
+{
+  {
+    std::lock_guard<decltype(mtx)> lk (mtx);
+    one_is_active = true;
+    /*++alive_count;
+    if ((alive_count & (alive_count + 1)) == 0)
+      std::printf("Alive, %llu\n", alive_count);*/
+    cv.notify_all();
+  }
+  pool.schedule([&pool](void){ stay_active(pool); });
 }
 
 void gather_statistics  (uint_fast64_t & balance_min,
@@ -85,12 +108,12 @@ int main()
         executed_tasks[i].store(0, std::memory_order_release);
       bool already_idling = false;
 
-      LOG("\t%s","Scheduling some tasks...");
+      LOG("\tScheduling some %s tasks...", (nn == 0) ? "immediate" : "delayed");
       pool.schedule([&](void)
       {
         for (unsigned i = 0; i < kTestRootTasks; ++i)
         {
-          pool.schedule([&](void)
+          pool.schedule_after(std::chrono::seconds(nn), [&](void)
           {
             for (unsigned j = 0; j < kTestBranchFactor; ++j)
             {
@@ -105,19 +128,19 @@ int main()
       unsigned total_ms = 0;
       for (unsigned ii = 0; ii < 9; ++ii)
       {
-        using namespace std::chrono_literals;
+        using namespace std::chrono;
         unsigned sleep_ms = (100 << ii);
-        std::this_thread::sleep_for(1ms * sleep_ms);
+        std::this_thread::sleep_for(milliseconds(sleep_ms));
         total_ms += sleep_ms;
 
         LOG("\t\t%s","Checking whether tasks are completed...");
         uint_fast64_t balance_min, balance_max, balance_total;
         gather_statistics(balance_min, balance_max, balance_total);
         LOG("\t\tCompleted %llu / %llu tasks so far.", balance_total, kTestTotalTasks);
-        if (pool.is_idle())
+        if (pool.is_idle() && (balance_total == kTestTotalTasks))
         {
           gather_statistics(balance_min, balance_max, balance_total);
-          LOG("\tPool has idled, as expected (%llu / %llu tasks complete.", balance_total, kTestTotalTasks);
+          LOG("\tPool has idled, as expected, with all %llu tasks complete.", kTestTotalTasks);
           LOG("\tProcessor utilization [min / mean / max]:\t%llu / %llu / %llu", balance_min, balance_total / pool.get_concurrency(), balance_max);
           break;
         }
@@ -139,6 +162,24 @@ int main()
     }
     LOG("\t%s", "Destroying the thread pool.");
   }
+
+  {
+    LOG("Test %u:\t%s",++test_id,"Destroy a ThreadPool with running task-chains.");
+    LOG("\t%s","Constructing a thread pool.");
+    ThreadPool pool (2);
+    LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
+    LOG("\t%s", "Scheduling several undying tasks...");
+    {
+      std::unique_lock<decltype(mtx)> guard (mtx);
+      one_is_active = false;
+      for (unsigned n = 0; n < 16; ++n)
+        pool.schedule([&pool](void) { stay_active(pool); });
+      cv.wait(guard, [](void)->bool { return one_is_active; });
+    }
+    LOG("\t\t%s","Done. Tasks are running.");
+    LOG("\t%s", "Destroying the thread pool.");
+  }
+
   LOG("%s", "Exiting...");
   return logged_errors;
 }

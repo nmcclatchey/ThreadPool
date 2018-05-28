@@ -32,6 +32,19 @@
 /// //  running task. This is called from within a worker thread, so no
 /// //  synchronization is required.
 ///   pool.schedule_subtask([](void) { });
+///
+/// //  Put a task into the pool, to be executed 2 seconds after it is scheduled.
+///  using namespace std::chrono;
+///  pool.schedule_after(seconds(2),
+///  [](void) {
+///    do_something();
+///  });
+///
+/// //    Put a task into the pool, to be executed at the specified time.
+///   pool.schedule_after(steady_clock::now() + seconds(2),
+///   [](void) {
+///     do_something();
+///   });
 /// });
 ///
 /// //    When the thread pool is destroyed, remaining tasks are forgotten.
@@ -53,14 +66,18 @@
 /// \todo Investigate delegates as a replacement for std::function:
 ///   <a href=https://www.codeproject.com/Articles/1170503/The-Impossibly-Fast-Cplusplus-Delegates-Fixed>"The Impossibly Fast C++ Delegates (Fixed)"</href>
 /// \author Nathaniel J. McClatchey, PhD
-/// \version  1.2.0
-/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.  \n
-///   Licensed under the MIT license. \n
+/// \version  1.3.0
+/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
+///   Licensed under the MIT license.                                         \n
 ///   You should have received a copy of the license with this software.
 ////////////////////////////////////////////////////////////////////////////////
 
 #ifndef THREAD_POOL_HPP_
 #define THREAD_POOL_HPP_
+
+#if !defined(__cplusplus) || (__cplusplus < 201103L)
+#error  "The ThreadPool library requires C++11 or higher."
+#endif
 
 //    For a unified interface to Callable objects, I considered 3 options:
 //  * Delegates (fast, but would need extra library and wouldn't allow return)
@@ -70,6 +87,8 @@
 #include <functional>
 //  For std::size_t
 #include <cstddef>
+//  For timed waiting.
+#include <chrono>
 //#include <future>
 
 /// \brief A high-performance asynchronous task scheduler.
@@ -92,10 +111,8 @@
 //  will impose a pointer lookup penalty, but only on the slow path. Moreover,
 //  dynamic allocation is required regardless, and all initial allocation is
 //  combined into a single allocation.
-class ThreadPool
+struct ThreadPool
 {
-  void * impl_;
- public:
 /// \brief  A Callable type, taking no arguments and returning void. Used to
 ///   store tasks for later execution.
   typedef std::function<void()> task_type;
@@ -133,6 +150,44 @@ class ThreadPool
   void schedule (const task_type & task);
 /// \overload
   void schedule (task_type && task);
+
+/// \brief  Schedules a task to be run asynchronously after a specified wait
+///   duration.
+/// \param[in]  rel_time  The duration after which the task is to be run.
+/// \param[in]  task  The task to be performed.
+///
+///   Schedules a task to be performed asynchronously, but only after waiting
+/// for a duration of *rel_time*.
+/// \par  Memory order
+///   Execution of a task *synchronizes-with* (as in `std::memory_order`) the
+/// call to `schedule_after()` that added it to the pool, using a
+/// *Release-Acquire* ordering.
+  template<class Rep, class Period, class Task>
+  void schedule_after ( const std::chrono::duration<Rep, Period> & rel_time,
+                        Task && task)
+  {
+    using namespace std;
+    sched_impl(chrono::duration_cast<duration>(rel_time), forward<Task>(task));
+  }
+
+/// \brief  Schedules a task to be run asynchronously at (or after) a specified
+///   point in time.
+/// \param[in]  time  The time point after which the task is to be run.
+/// \param[in]  task  The task to be performed.
+///
+///   Schedules a task to be performed asynchronously at a specified time point.
+/// \par  Memory order
+///   Execution of a task *synchronizes-with* (as in `std::memory_order`) the
+/// call to `schedule_after()` that added it to the pool, using a
+/// *Release-Acquire* ordering.
+  template<class Clock, class Duration, class Task>
+  void schedule_after ( const std::chrono::time_point<Clock, Duration> & time,
+                        Task && task)
+  {
+    using namespace std;
+    using namespace std::chrono;
+    sched_impl(duration_cast<duration>(time-Clock::now()), forward<Task>(task));
+  }
 
 /// \brief  Schedules a task to be run asynchronously, but with a hint that the
 ///   task ought to be considered part of the currently-scheduled task.
@@ -193,6 +248,11 @@ class ThreadPool
 /// the pool are simultaneously idling, or fales if at least one thread is
 /// active. May return \c false spuriously.
   bool is_idle (void) const;
+ private:
+  void * impl_;
+  typedef std::chrono::steady_clock::duration duration;
+  void sched_impl ( const duration &, const task_type &);
+  void sched_impl ( const duration &, task_type && task);
 };
 
 #endif // THREAD_POOL_HPP_
