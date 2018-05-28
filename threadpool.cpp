@@ -83,9 +83,6 @@ struct ThreadPoolImpl
     return threads_;
   }
 
-  void pause (void);
-  void unpause (void);
-
   template<typename Task>
   void schedule_overflow (Task &&);
 
@@ -216,7 +213,6 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   void stop_thread (void)
   {
     assert(pool_.should_stop());
-    //assert(thread_.joinable());
     if (thread_.joinable())
       thread_.join();
   }
@@ -311,7 +307,7 @@ size exceeds limit of selected index type.");
 
 Worker::Worker (ThreadPoolImpl & pool)
   : front_(0), back_(0), countdown_(2), front_invalid_(false), pool_(pool),
-    thread_(std::reference_wrapper<Worker>(*this))
+    thread_()
 {
 }
 
@@ -738,12 +734,12 @@ void Worker::operator() (void)
     std::unique_lock<mutex_type> guard(mutex);
     ++pool_.living_;
     pool_.cv_.notify_all();
-    ++pool_.idle_;
+    /*++pool_.idle_;
     ThreadPoolImpl * ptr = &pool_;
     pool_.cv_.wait(guard, [ptr] (void) -> bool {
       return (ptr->living_ == ptr->threads_) || ptr->should_stop();
     });
-    --pool_.idle_;
+    --pool_.idle_;*/
   }
   while (true)
   {
@@ -860,6 +856,8 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
   std::unique_lock<decltype(mutex_)> guard (mutex_);
   for (unsigned i = 0; i < threads_; ++i)
     new(workers + i) Worker(*this);
+  for (unsigned i = 0; i < threads_; ++i)
+    workers_[i].restart_thread();
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
   cv_.wait(guard, [this](void)->bool {
     return (living_ == threads_) || stop_.load(std::memory_order_relaxed);
@@ -896,27 +894,6 @@ void ThreadPoolImpl::stop_threads (std::unique_lock<decltype(mutex_)> & guard)
     workers_[i].stop_thread();
 
   stop_.store(false, std::memory_order_release);
-}
-
-void ThreadPoolImpl::pause (void)
-{
-  std::unique_lock<decltype(mutex_)> guard (mutex_);
-  stop_threads(guard);
-}
-
-//  Note: Because of the mutex, can call from any thread at any time.
-void ThreadPoolImpl::unpause (void)
-{
-  std::unique_lock<decltype(mutex_)> guard (mutex_);
-  if (living_ > 0)
-    return;
-
-  for (unsigned i = 0; i < threads_; ++i)
-    workers_[i].restart_thread();
-
-  cv_.wait(guard, [this](void)->bool {
-    return (living_ == threads_) || stop_.load(std::memory_order_relaxed);
-  });
 }
 
 unsigned ThreadPoolImpl::get_concurrency(void) const
@@ -1050,15 +1027,6 @@ std::size_t ThreadPool::get_worker_capacity (void)
 {
   return kModulus - 1;
 }
-
-/*void ThreadPool::pause (void)
-{
-  static_cast<ThreadPoolImpl*>(impl_)->pause();
-}
-void ThreadPool::unpause (void)
-{
-  static_cast<ThreadPoolImpl*>(impl_)->unpause();
-}*/
 
 ThreadPool::ThreadPool (unsigned threads)
   : impl_(nullptr)
