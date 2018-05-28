@@ -173,13 +173,12 @@ struct ThreadPoolImpl
   std::condition_variable cv_;
   mutable std::mutex mutex_;
 
-  std::atomic<unsigned> living_;
   std::atomic<bool> stop_;
 
   std::queue<task_type> queue_;
   std::priority_queue<timed_task, std::vector<timed_task>, TaskOrder> time_queue_;
 
-  unsigned idle_, threads_;
+  unsigned threads_, living_, idle_;
 
   Worker * workers_;
 
@@ -307,7 +306,7 @@ size exceeds limit of selected index type.");
   std::thread thread_;
 //  Task queue.
 //  task_type tasks_ [kModulus];
-  char tasks_ [kModulus * sizeof(task_type)];
+  alignas(task_type) char tasks_ [kModulus * sizeof(task_type)];
 };
 
 Worker::Worker (ThreadPoolImpl & pool)
@@ -735,15 +734,14 @@ void Worker::operator() (void)
   typedef decltype(pool_.mutex_) mutex_type;
   mutex_type & mutex = pool_.mutex_;
 
-  pool_.living_.fetch_add(1, std::memory_order_relaxed);
   {
     std::unique_lock<mutex_type> guard(mutex);
+    ++pool_.living_;
     pool_.cv_.notify_all();
     ++pool_.idle_;
     ThreadPoolImpl * ptr = &pool_;
     pool_.cv_.wait(guard, [ptr] (void) -> bool {
-      return (ptr->living_.load(std::memory_order_relaxed) == ptr->threads_) ||
-              ptr->should_stop();
+      return (ptr->living_ == ptr->threads_) || ptr->should_stop();
     });
     --pool_.idle_;
   }
@@ -814,7 +812,7 @@ void Worker::operator() (void)
 //  Fifth, wait a bit for something to change...
     auto num_threads = pool_.get_concurrency();
     bool should_idle = (count_tasks() == 0);
-    for (auto n = num_threads; n && should_idle; --n)
+    for (auto n = num_threads; n-- && should_idle;)
     {
       Worker * victim = pool_.workers_ + n;
       should_idle = (victim->count_tasks() < 2);
@@ -845,7 +843,7 @@ kill:
   current_worker = nullptr;
   {
     std::unique_lock<mutex_type> guard (mutex);
-    pool_.living_.fetch_sub(1, std::memory_order_acq_rel);
+    --pool_.living_;
     pool_.cv_.notify_all();
   }
 }
@@ -854,9 +852,9 @@ kill:
 
 ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
   : cv_(), mutex_(),
-    living_(0), stop_(false),
+    stop_(false),
     queue_(), time_queue_(),
-    idle_(0), threads_(threads),
+    threads_(threads), living_(0), idle_(0),
     workers_(workers)
 {
   std::unique_lock<decltype(mutex_)> guard (mutex_);
@@ -864,8 +862,7 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
     new(workers + i) Worker(*this);
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
   cv_.wait(guard, [this](void)->bool {
-    return (living_.load(std::memory_order_relaxed) == threads_) ||            \
-           stop_.load(std::memory_order_relaxed);
+    return (living_ == threads_) || stop_.load(std::memory_order_relaxed);
   });
 }
 
@@ -892,7 +889,7 @@ void ThreadPoolImpl::stop_threads (std::unique_lock<decltype(mutex_)> & guard)
   if (idle_ > 0)
     cv_.notify_all();
   cv_.wait(guard, [this](void)->bool {
-    return (living_.load(std::memory_order_relaxed) == 0);
+    return (living_ == 0);
   });
 
   for (unsigned i = 0; i < threads_; ++i)
@@ -911,15 +908,14 @@ void ThreadPoolImpl::pause (void)
 void ThreadPoolImpl::unpause (void)
 {
   std::unique_lock<decltype(mutex_)> guard (mutex_);
-  if (living_.load(std::memory_order_relaxed) > 0)
+  if (living_ > 0)
     return;
 
   for (unsigned i = 0; i < threads_; ++i)
     workers_[i].restart_thread();
 
   cv_.wait(guard, [this](void)->bool {
-    return (living_.load(std::memory_order_relaxed) == threads_) ||            \
-           stop_.load(std::memory_order_relaxed);
+    return (living_ == threads_) || stop_.load(std::memory_order_relaxed);
   });
 }
 
@@ -931,7 +927,7 @@ unsigned ThreadPoolImpl::get_concurrency(void) const
 bool ThreadPoolImpl::is_idle (void) const
 {
   std::lock_guard<decltype(mutex_)> guard (mutex_);
-  return idle_ > 0;
+  return idle_ == living_;
 }
 
 template<typename Task>
