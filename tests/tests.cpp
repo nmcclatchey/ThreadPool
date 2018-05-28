@@ -28,6 +28,7 @@ void perform_task (void);
 void gather_statistics  (uint_fast64_t & balance_min,
                          uint_fast64_t & balance_max,
                          uint_fast64_t & balance_total);
+void stay_active (ThreadPool &);
 
 thread_local std::atomic<uint_fast64_t> * task_slot_local = nullptr;
 std::atomic<uint_fast32_t> task_slot_next(0);
@@ -127,9 +128,9 @@ int main()
       unsigned total_ms = 0;
       for (unsigned ii = 0; ii < 9; ++ii)
       {
-        using namespace std::chrono_literals;
+        using namespace std::chrono;
         unsigned sleep_ms = (100 << ii);
-        std::this_thread::sleep_for(1ms * sleep_ms);
+        std::this_thread::sleep_for(milliseconds(sleep_ms));
         total_ms += sleep_ms;
 
         LOG("\t\t%s","Checking whether tasks are completed...");
