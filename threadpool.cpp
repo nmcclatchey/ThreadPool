@@ -871,6 +871,14 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
 
 ThreadPoolImpl::~ThreadPoolImpl (void)
 {
+#ifndef NDEBUG
+  if ((current_worker != nullptr) && current_worker->belongs_to(this))
+  {
+    std::printf("ERROR!\tA worker thread may not destroy the ThreadPool to \
+which it belongs.\n");
+    std::abort();
+  }
+#endif
   std::unique_lock<decltype(mutex_)> guard (mutex_);
   stop_threads(guard);
   for (unsigned i = 0; i < threads_; ++i)

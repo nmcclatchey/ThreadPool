@@ -75,6 +75,10 @@
 #ifndef THREAD_POOL_HPP_
 #define THREAD_POOL_HPP_
 
+#if !defined(__cplusplus) || (__cplusplus < 201103L)
+#error  "The ThreadPool library requires C++11 or higher."
+#endif
+
 //    For a unified interface to Callable objects, I considered 3 options:
 //  * Delegates (fast, but would need extra library and wouldn't allow return)
 //  * std::function (universally available, but doesn't allow return)
