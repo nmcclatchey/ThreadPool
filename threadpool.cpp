@@ -63,6 +63,33 @@ static_assert(kLog2Modulus > 0, "Worker thread capacity must be positive.");
 
 constexpr std::size_t kModulus = 1 << kLog2Modulus;
 
+/// \brief  Least-significant bit of an integer. Useful for alignment of arrays,
+///   because an alignment greater than the L.S.B. of the size of an element
+///   will be ruined on increment.
+template<class Integer>
+constexpr Integer lsb (Integer x) noexcept
+{
+  return ((x - 1) & x) ^ x;
+}
+
+/// \brief  Exactly what it says on the tin. I'd use `std::min`, but that's not
+///   `constexpr` until C++14.
+template<class Integer1, class Integer2>
+constexpr typename std::common_type<Integer1, Integer2>::type min (Integer1 x, Integer2 y) noexcept
+{
+  typedef typename std::common_type<Integer1, Integer2>::type result_type;
+  return (static_cast<result_type>(x) < static_cast<result_type>(y)) ? x : y;
+}
+
+/// \brief  Exactly what it says on the tin. I'd use `std::max`, but that's not
+///   `constexpr` until C++14.
+template<class Integer1, class Integer2>
+constexpr typename std::common_type<Integer1, Integer2>::type max (Integer1 x, Integer2 y) noexcept
+{
+  typedef typename std::common_type<Integer1, Integer2>::type result_type;
+  return (static_cast<result_type>(x) < static_cast<result_type>(y)) ? y : x;
+}
+
 /// \brief  Provides O(1) access to the Worker that is handling the current
 ///   function (if any). Used to provide a fast path for scheduling within the
 ///   ThreadPool.
@@ -73,12 +100,18 @@ struct ThreadPoolImpl
   typedef typename ThreadPool::task_type task_type;
   typedef std::chrono::steady_clock clock;
   typedef std::pair<clock::time_point, task_type> timed_task;
+  typedef std::uint_fast16_t index_type;
 
-  ThreadPoolImpl (Worker *, unsigned);
+  ThreadPoolImpl (Worker *, index_type);
   ~ThreadPoolImpl (void);
 
 //  Returns number of allocated Workers (may differ from active workers later)
-  unsigned get_capacity (void) const
+  inline index_type get_capacity (void) const
+  {
+    return threads_;
+  }
+
+  inline index_type get_concurrency (void) const
   {
     return threads_;
   }
@@ -89,7 +122,6 @@ struct ThreadPoolImpl
   template<typename Task>
   void schedule_after (const clock::duration &, Task &&);
 
-  unsigned get_concurrency (void) const;
   bool is_idle (void) const;
 
   inline bool should_stop (void) const
@@ -170,14 +202,14 @@ struct ThreadPoolImpl
   std::condition_variable cv_;
   mutable std::mutex mutex_;
 
-  std::atomic<bool> stop_;
-
   std::queue<task_type> queue_;
   std::priority_queue<timed_task, std::vector<timed_task>, TaskOrder> time_queue_;
 
-  unsigned threads_, living_, idle_;
+  Worker * const workers_;
 
-  Worker * workers_;
+  index_type threads_, living_, idle_;
+
+  std::atomic<bool> stop_;
 
   ThreadPoolImpl (const ThreadPoolImpl &) = delete;
   ThreadPoolImpl & operator= (const ThreadPoolImpl &) = delete;
@@ -199,7 +231,7 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
 {
   typedef typename ThreadPool::task_type task_type;
 
-  Worker (ThreadPoolImpl &);
+  Worker (ThreadPoolImpl &) noexcept;
   ~Worker (void);
 
   void operator() (void);
@@ -239,12 +271,12 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   static_assert(kLog2Modulus <= kValidShift, "ThreadPool's local task queue \
 size exceeds limit of selected index type.");
 
-  inline static constexpr index_type get_distance (index_type, index_type);
+  inline static index_type get_distance (index_type,index_type) noexcept;
   //inline static constexpr index_type get_writeable (index_type, index_type);
-  inline static constexpr index_type get_valid (index_type);
-  inline static constexpr index_type get_write (index_type);
-  inline static constexpr index_type make_back (index_type, index_type);
-  inline static constexpr index_type make_back (index_type);
+  inline static index_type get_valid (index_type) noexcept;
+  inline static index_type get_write (index_type) noexcept;
+  inline static index_type make_back (index_type,index_type) noexcept;
+  inline static index_type make_back (index_type) noexcept;
 
 
   unsigned steal (void);
@@ -280,33 +312,37 @@ size exceeds limit of selected index type.");
 //    store a past-the-end (PTE) marker for the occupied slots, and a PTE marker
 //    for the slots this Worker is permitted to read, respectively.
   std::atomic<index_type> front_, back_;
+//    When this Worker runs out of tasks, it will search for more. A central
+//  ThreadPool object will serve to coordinate work-stealing (that is, store the
+//  addresses of other Workers), provide new tasks, and capture overflow should
+//  a Worker generate more tasks than can fit in its deque.
+  ThreadPoolImpl & pool_;
 //    To avoid starvation for tasks in the overflow queue, I pull in its tasks
 //  once every time a worker finishes a batch of tasks. The variable countdown_
 //  records the remaining size of the batch. A successfully scheduled subtask
 //  will increment this to ensure the originally scheduled tasks are completed
 //  as part of the batch.
-  uint_fast32_t countdown_ : kValidShift,
+  uint_fast32_t countdown_ : (kValidShift + 8),
 //    While a task is being executed, the front_ marker is not incremented. This
 //  avoids early claiming of a new task (which would prevent that task from
 //  being stolen), but makes the push-to-front process a bit more complicated.
 //  In particular, the push-to-front should overwrite the front when first
 //  called during an execution, but not afterward.
                 front_invalid_ : 1;
-//    When this Worker runs out of tasks, it will search for more. A central
-//  ThreadPool object will serve to coordinate work-stealing (that is, store the
-//  addresses of other Workers), provide new tasks, and capture overflow should
-//  a Worker generate more tasks than can fit in its deque.
-  ThreadPoolImpl & pool_;
 //    Need to keep the thread's handle for later joining. I could work around
 //  this, but the workaround would be less efficient.
   std::thread thread_;
-//  Task queue.
-//  task_type tasks_ [kModulus];
-  alignas(task_type) char tasks_ [kModulus * sizeof(task_type)];
+//    Task queue. When information about the cache is available, allocate so
+//  that tasks aren't split across cache lines. Note: If splitting is
+//  inevitable, make a best-effort attempt to reduce it.
+  alignas(min(lsb(sizeof(task_type)), THREAD_POOL_FALSE_SHARING_ALIGNMENT))    \
+    char tasks_ [kModulus * sizeof(task_type)];
 };
 
-Worker::Worker (ThreadPoolImpl & pool)
-  : front_(0), back_(0), countdown_(2), front_invalid_(false), pool_(pool),
+Worker::Worker (ThreadPoolImpl & pool) noexcept
+  : front_(0), back_(0),
+    pool_(pool),
+    countdown_(2), front_invalid_(false),
     thread_()
 {
 }
@@ -353,28 +389,28 @@ Worker::~Worker (void)
   remove_all_and([](task_type&&){});
 }
 
-constexpr typename Worker::index_type Worker::get_distance (index_type left, index_type right)
+typename Worker::index_type Worker::get_distance (index_type left, index_type right) noexcept
 {
   return (right - left + kModulus) % kModulus;
 }
 
-constexpr typename Worker::index_type Worker::get_valid (index_type b)
+typename Worker::index_type Worker::get_valid (index_type b) noexcept
 {
   return b >> kValidShift;
 }
 
-constexpr typename Worker::index_type Worker::get_write (index_type b)
+typename Worker::index_type Worker::get_write (index_type b) noexcept
 {
   static_assert((kWriteMask >> kValidShift) == 0, "WRITE and VALID regions must not intersect.");
   return b & kWriteMask;
 }
 
-constexpr typename Worker::index_type Worker::make_back (index_type write, index_type valid)
+typename Worker::index_type Worker::make_back (index_type write, index_type valid) noexcept
 {
   return write | (valid << kValidShift);
 }
 
-constexpr typename Worker::index_type Worker::make_back (index_type write)
+typename Worker::index_type Worker::make_back (index_type write) noexcept
 {
   return write | (write << kValidShift);
 }
@@ -846,17 +882,17 @@ kill:
 
 
 
-ThreadPoolImpl::ThreadPoolImpl (Worker * workers, unsigned threads)
+ThreadPoolImpl::ThreadPoolImpl (Worker * workers, index_type threads)
   : cv_(), mutex_(),
-    stop_(false),
     queue_(), time_queue_(),
+    workers_(workers),
     threads_(threads), living_(0), idle_(0),
-    workers_(workers)
+    stop_(false)
 {
   std::unique_lock<decltype(mutex_)> guard (mutex_);
-  for (unsigned i = 0; i < threads_; ++i)
+  for (index_type i = 0; i < threads_; ++i)
     new(workers + i) Worker(*this);
-  for (unsigned i = 0; i < threads_; ++i)
+  for (index_type i = 0; i < threads_; ++i)
     workers_[i].restart_thread();
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
   cv_.wait(guard, [this](void)->bool {
@@ -876,7 +912,7 @@ which it belongs.\n");
 #endif
   std::unique_lock<decltype(mutex_)> guard (mutex_);
   stop_threads(guard);
-  for (unsigned i = 0; i < threads_; ++i)
+  for (index_type i = 0; i < threads_; ++i)
     workers_[i].~Worker();
 }
 
@@ -890,15 +926,10 @@ void ThreadPoolImpl::stop_threads (std::unique_lock<decltype(mutex_)> & guard)
     return (living_ == 0);
   });
 
-  for (unsigned i = 0; i < threads_; ++i)
+  for (index_type i = 0; i < threads_; ++i)
     workers_[i].stop_thread();
 
   stop_.store(false, std::memory_order_release);
-}
-
-unsigned ThreadPoolImpl::get_concurrency(void) const
-{
-  return threads_;
 }
 
 bool ThreadPoolImpl::is_idle (void) const
@@ -944,7 +975,7 @@ std::atomic_flag overflow_warning_given = ATOMIC_FLAG_INIT;
 void debug_warn_overflow (void)
 {
   if (!overflow_warning_given.test_and_set())
-    std::printf("Task queue overflow (more than %llu tasks in a single worker's \
+    std::printf("Task queue overflow (more than %zu tasks in a single worker's \
 queue). May impact performance.", ThreadPool::get_worker_capacity());
 }
 #else
@@ -1038,8 +1069,17 @@ ThreadPool::ThreadPool (unsigned threads)
     if (threads < 2)
       threads = 2;
   }
+//    Ensure that the specified number of threads doesn't exceed that which the
+//  implementation is designed to hold.
+  if (threads > static_cast<ThreadPoolImpl::index_type>(-1))
+    threads = static_cast<ThreadPoolImpl::index_type>(-1);
+//    Alignment change during Worker allocation is an integer multiple of
+//  alignof(Worker). If (alignof(Worker) >= alignof(ThreadPoolImpl)), then
+//  the second align will not do anything, and the problem is solved. Otherwise,
+//  Alignment is off by at most alignof(ThreadPoolImpl) - alignof(Worker).
+//    Total alignment is off by at most the greater of the alignments.
   std::size_t space = sizeof(ThreadPoolImpl) + threads * sizeof(Worker) +      \
-                 alignof(ThreadPoolImpl) + alignof(Worker) + sizeof(void**);
+                 max(alignof(ThreadPoolImpl), alignof(Worker)) + sizeof(void**);
   void * memory = std::malloc(space);
   if (memory == nullptr)
     goto fail_l1;
