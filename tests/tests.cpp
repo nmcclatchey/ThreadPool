@@ -13,6 +13,7 @@
 #include <cassert>
 #include <cstdio>
 #include <atomic>
+#include <cstdint>
 
 #define LOG(fmtString,...) printf(fmtString "\n", ##__VA_ARGS__); fflush(stdout)
 
@@ -21,7 +22,7 @@ using namespace std;
 constexpr size_t kTestMaxThreads = 1024;
 constexpr size_t kTestRootTasks = 10000;
 constexpr size_t kTestBranchFactor = 8000;
-constexpr size_t kTestTotalTasks = kTestRootTasks * kTestBranchFactor;
+constexpr uint_fast64_t kTestTotalTasks = kTestRootTasks * kTestBranchFactor;
 
 
 void perform_task (void);
@@ -85,7 +86,7 @@ int main()
   int test_id = 0;
   {
     LOG("Test %u:\t%s",++test_id,"Query static information");
-    LOG("\tWorker queue capacity is %llu tasks.",ThreadPool::get_worker_capacity());
+    LOG("\tWorker queue capacity is %zu tasks.",ThreadPool::get_worker_capacity());
   }
   {
     LOG("Test %u:\t%s",++test_id,"Construct and destroy empty threadpool.");
