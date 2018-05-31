@@ -4,9 +4,8 @@
 /// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
 ///   Licensed under the MIT license.                                         \n
 ///   You should have received a copy of the license with this software.
-/// \note   To compile for MinGW-w64 without linking against the winpthreads
-/// library, use the <a href=https://github.com/nmcclatchey/mingw-std-threads>
-/// MinGW Windows STD Threads library</a>.
+/// \note   To compile for MinGW-w64 without linking against the *winpthreads*
+/// library, use the [*MinGW Windows STD Threads* library](https://github.com/nmcclatchey/mingw-std-threads).
 #include "threadpool.hpp"
 
 #if !defined(__cplusplus) || (__cplusplus < 201103L)
@@ -72,6 +71,17 @@ constexpr Integer lsb (Integer x) noexcept
   return ((x - 1) & x) ^ x;
 }
 
+/// \brief  Checks whether and integer is a power-of-2. Useful for alignment
+///   debugging.
+template<class Integer>
+constexpr Integer is_pow2 (Integer x) noexcept
+{
+  return ((x - 1) & x) == 0;
+}
+
+static_assert(is_pow2(THREAD_POOL_FALSE_SHARING_ALIGNMENT), "Alignments must be\
+ integer powers of 2.");
+
 /// \brief  Exactly what it says on the tin. I'd use `std::min`, but that's not
 ///   `constexpr` until C++14.
 template<class Integer1, class Integer2>
@@ -106,12 +116,12 @@ struct ThreadPoolImpl
   ~ThreadPoolImpl (void);
 
 //  Returns number of allocated Workers (may differ from active workers later)
-  inline index_type get_capacity (void) const
+  inline index_type get_capacity (void) const noexcept
   {
     return threads_;
   }
 
-  inline index_type get_concurrency (void) const
+  inline index_type get_concurrency (void) const noexcept
   {
     return threads_;
   }
@@ -124,7 +134,7 @@ struct ThreadPoolImpl
 
   bool is_idle (void) const;
 
-  inline bool should_stop (void) const
+  inline bool should_stop (void) const noexcept
   {
     return stop_.load(std::memory_order_relaxed);
   }
@@ -249,7 +259,7 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
       thread_.join();
   }
 
-  inline bool belongs_to (ThreadPoolImpl * ptr) const
+  inline bool belongs_to (ThreadPoolImpl * ptr) const noexcept
   {
     return &pool_ == ptr;
   }
@@ -322,7 +332,11 @@ size exceeds limit of selected index type.");
 //  records the remaining size of the batch. A successfully scheduled subtask
 //  will increment this to ensure the originally scheduled tasks are completed
 //  as part of the batch.
-  uint_fast32_t countdown_ : (kValidShift + 8),
+  static_assert(kLog2Modulus < sizeof(std::uint_fast32_t) * CHAR_BIT - 2, "The \
+behavior of the worker queue's starvation-avoidance algorithm has not yet been \
+examined in the case that the starvation-avoidance countdown is small relative \
+to the task queue.");
+  std::uint_fast32_t  countdown_ : (sizeof(std::uint_fast32_t) * CHAR_BIT - 1),
 //    While a task is being executed, the front_ marker is not incremented. This
 //  avoids early claiming of a new task (which would prevent that task from
 //  being stolen), but makes the push-to-front process a bit more complicated.
@@ -335,8 +349,8 @@ size exceeds limit of selected index type.");
 //    Task queue. When information about the cache is available, allocate so
 //  that tasks aren't split across cache lines. Note: If splitting is
 //  inevitable, make a best-effort attempt to reduce it.
-  alignas(min(lsb(sizeof(task_type)), THREAD_POOL_FALSE_SHARING_ALIGNMENT))    \
-    char tasks_ [kModulus * sizeof(task_type)];
+  alignas(max(alignof(task_type), min(lsb(sizeof(task_type)),\
+THREAD_POOL_FALSE_SHARING_ALIGNMENT))) char tasks_ [kModulus*sizeof(task_type)];
 };
 
 Worker::Worker (ThreadPoolImpl & pool) noexcept
