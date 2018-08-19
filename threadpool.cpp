@@ -303,6 +303,7 @@ size exceeds limit of selected index type.");
   inline static index_type get_valid (index_type) noexcept;
   inline static index_type get_write (index_type) noexcept;
   inline static index_type make_back (index_type, index_type) noexcept;
+
   inline static index_type make_back (index_type) noexcept;
 
 
@@ -896,8 +897,6 @@ void Worker::operator() (void)
 //  If our new tasks are already from the queue, no need to refresh.
       countdown_ += kPullFromQueue;
     }
-    /*else
-      std::this_thread::yield();*/
   }
 kill:
   current_worker = nullptr;
@@ -908,8 +907,6 @@ kill:
     pool_.cv_.notify_all();
   }
 }
-
-
 
 
 
@@ -1052,7 +1049,6 @@ template<typename Task>
 void ThreadPoolImpl::schedule_overflow (Task && task)
 {
   std::lock_guard<decltype(mutex_)> guard (mutex_);
-  //queue_.emplace(std::forward<Task>(task));
   push(std::forward<Task>(task));
   notify_if_idle();
 }
@@ -1145,7 +1141,6 @@ void impl_schedule_after (const std::chrono::steady_clock::duration & dur,
   }
 }
 }
-
 
 
 
