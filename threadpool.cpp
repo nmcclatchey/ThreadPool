@@ -783,13 +783,8 @@ void Worker::operator() (void)
   {
     std::unique_lock<mutex_type> guard(mutex);
     ++pool_.living_;
+    guard.unlock();
     pool_.cv_.notify_all();
-    /*++pool_.idle_;
-    ThreadPoolImpl * ptr = &pool_;
-    pool_.cv_.wait(guard, [ptr] (void) -> bool {
-      return (ptr->living_ == ptr->threads_) || ptr->should_stop();
-    });
-    --pool_.idle_;*/
   }
   while (true)
   {
@@ -882,14 +877,13 @@ void Worker::operator() (void)
 //  If our new tasks are already from the queue, no need to refresh.
       countdown_ += kPullFromQueue;
     }
-    /*else
-      std::this_thread::yield();*/
   }
 kill:
   current_worker = nullptr;
   {
     std::unique_lock<mutex_type> guard (mutex);
     --pool_.living_;
+    guard.unlock();
     pool_.cv_.notify_all();
   }
 }
@@ -956,7 +950,6 @@ template<typename Task>
 void ThreadPoolImpl::schedule_overflow (Task && task)
 {
   std::lock_guard<decltype(mutex_)> guard (mutex_);
-  //queue_.emplace(std::forward<Task>(task));
   push(std::forward<Task>(task));
   notify_if_idle();
 }
