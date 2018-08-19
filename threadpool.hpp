@@ -234,11 +234,12 @@ struct ThreadPool
 /// function returns the number of tasks that each worker can keep in its own
 /// queue -- that is, the number of tasks that a worker can have scheduled
 /// before contention occurs.                                                 \n
-///   Selection of the size of the queue may be done in `thread_pool.cpp` by
-/// editing If the returned value is large, many tasks may be simultaneously scheduled
+///   If the returned value is large, many tasks may be simultaneously scheduled
 /// without taking the slow path, but more memory is required. If it is small,
 /// task scheduling is more likely to take the slow path, but less memory is
-/// required.
+/// required.                                                                 \n
+///   To select the size of the worker queues, edit the variable `kLog2Modulus`
+/// in `thread_pool.cpp`
   static std::size_t get_worker_capacity (void);
 
 /// \brief  Returns whether the pool is currently idle.
