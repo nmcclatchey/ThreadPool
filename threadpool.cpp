@@ -4,9 +4,8 @@
 /// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
 ///   Licensed under the MIT license.                                         \n
 ///   You should have received a copy of the license with this software.
-/// \note   To compile for MinGW-w64 without linking against the winpthreads
-/// library, use the <a href=https://github.com/nmcclatchey/mingw-std-threads>
-/// MinGW Windows STD Threads library</a>.
+/// \note   To compile for MinGW-w64 without linking against the *winpthreads*
+/// library, use the [*MinGW Windows STD Threads* library](https://github.com/nmcclatchey/mingw-std-threads).
 #include "threadpool.hpp"
 
 #if !defined(__cplusplus) || (__cplusplus < 201103L)
@@ -801,6 +800,7 @@ void Worker::operator() (void)
   {
     std::unique_lock<mutex_type> guard(mutex);
     ++pool_.living_;
+    guard.unlock();
     pool_.cv_.notify_all();
   }
 //  The thread is started after all workers are initialized; no need to wait.
@@ -904,6 +904,7 @@ kill:
   {
     std::unique_lock<mutex_type> guard (mutex);
     --pool_.living_;
+    guard.unlock();
     pool_.cv_.notify_all();
   }
 }
