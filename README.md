@@ -56,7 +56,7 @@ pool.schedule([](void)
 
 ## Authors
 
-* **Nathaniel J. McClatchey** - *Initial work*
+* **Nathaniel J. McClatchey, PhD** - *Initial work*
 
 ## License
 
