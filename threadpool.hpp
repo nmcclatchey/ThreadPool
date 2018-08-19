@@ -4,8 +4,8 @@
 ///
 ///   This header is part of a multi-tasking library that provides low-overhead
 /// concurrent scheduling. This is provided through a thread pool, and uses the
-/// <a href=https://en.wikipedia.org/wiki/Work_stealing>work-stealing method</a>
-/// for work balancing.                                                       \n
+/// [work-stealing method](https://en.wikipedia.org/wiki/Work_stealing) for load
+/// balancing.                                                           \n
 ///   This averts the overhead of creating a new thread for each task, and thus
 /// makes fine-grained parallelism feasible.
 /// \code
@@ -62,13 +62,13 @@
 ///   is 64 bytes, as this is typical of x86 and x64 systems.
 /// \note Users may specify the capacity of each worker's fixed queue by
 ///   changing the definition of `kLog2Modulus` in \ref `thread_pool.cpp`.
-/// \todo Allow tasks to return values, possibly using std::packaged_task.
-/// \todo Investigate delegates as a replacement for std::function:
-///   <a href=https://www.codeproject.com/Articles/1170503/The-Impossibly-Fast-Cplusplus-Delegates-Fixed>"The Impossibly Fast C++ Delegates (Fixed)"</href>
+/// \todo Allow tasks to return values, possibly using `std::packaged_task`.
+/// \todo Investigate delegates as a replacement for `std::function`:
+///   ["The Impossibly Fast C++ Delegates (Fixed)"](https://www.codeproject.com/Articles/1170503/The-Impossibly-Fast-Cplusplus-Delegates-Fixed)
 /// \author Nathaniel J. McClatchey, PhD
-/// \version  1.3.0
+/// \version  1.4.0
 /// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
-///   Licensed under the MIT license.                                         \n
+///   [Licensed under the MIT license.](https://github.com/nmcclatchey/ThreadPool/blob/master/LICENSE)  \n
 ///   You should have received a copy of the license with this software.
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -132,6 +132,8 @@ struct ThreadPool
 /// until they terminate. Though any task that has already been started will be
 /// completed, any tasks that are not active when `~ThreadPool()` is called
 /// may be forgotten.
+/// \warning  Using a worker thread to destroy its own `ThreadPool` results in
+///   undefined behavior.
   ~ThreadPool (void);
 
 //  Thread pools cannot be copied or moved.
@@ -239,16 +241,42 @@ struct ThreadPool
 /// task scheduling is more likely to take the slow path, but less memory is
 /// required.                                                                 \n
 ///   To select the size of the worker queues, edit the variable `kLog2Modulus`
-/// in `thread_pool.cpp`
+/// in `thread_pool.cpp`.
   static std::size_t get_worker_capacity (void);
 
 /// \brief  Returns whether the pool is currently idle.
-/// \return \c true if the pool is idle, or \c false if not.
+/// \return `true` if the pool is idle, or `false` if not.
 ///
 ///   Returns whether the pool is idle. That is, returns true if all threads in
-/// the pool are simultaneously idling, or fales if at least one thread is
-/// active. May return \c false spuriously.
+/// the pool are simultaneously idling, or `false` if at least one thread is
+/// active. If the pool is halted, the returned value is undefined. Calling this
+/// from within one of the `ThreadPool`'s tasks necessarily returns `false`.
   bool is_idle (void) const;
+
+/// \brief  Suspends execution of tasks in the `ThreadPool`.
+///
+///   Halts all worker threads, blocking the caller until worker threads have
+/// fully halted. If `halt()` is called from within one of the pool's worker
+/// threads, the calling thread is halted either until `resume()` is called or
+/// until the `ThreadPool` is destroyed, whichever comes first.
+/// \see  `resume()`
+  void halt (void);
+
+/// \brief  Resumes execution of tasks in the `ThreadPool` after a call to
+///   `halt()`.
+///
+///   If execution is currently halted, re-starts all worker threads, possibly
+/// blocking the caller until all worker threads have resumed their tasks.
+/// \see  `halt()`
+  void resume (void);
+
+/// \brief  Returns whether the pool is currently halted.
+/// \return Returns `true` if all worker threads are halted, or `false` if not.
+///
+///   Returns whether the pool is currently halted. Note that this function only
+/// begins to return `true` once all tasks have fully halted. Calling it from
+/// within one of the `ThreadPool`'s tasks necessarily returns `false`.
+  bool is_halted (void) const;
  private:
   void * impl_;
   typedef std::chrono::steady_clock::duration duration;

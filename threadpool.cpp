@@ -14,6 +14,7 @@
 
 #include <atomic>             //  For atomic indexes, etc.
 #include <queue>              //  For central task queue
+#include <cstdint>            //  Fixed-width integer types.
 
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>             //  For threads. Duh.
@@ -126,6 +127,10 @@ struct ThreadPoolImpl
     return threads_;
   }
 
+  void halt (void);
+  void resume (void);
+  bool is_halted (void) const;
+
   template<typename Task>
   void schedule_overflow (Task &&);
 
@@ -136,8 +141,9 @@ struct ThreadPoolImpl
 
   inline bool should_stop (void) const noexcept
   {
-    return stop_.load(std::memory_order_relaxed);
+    return stop_.load(std::memory_order_relaxed) & 0x01;
   }
+
 
   void notify_if_idle (void)
   {
@@ -198,7 +204,7 @@ struct ThreadPoolImpl
       cv_.wait_until(lk, time_queue_.top().first);
   }
 
-  inline Worker * data (void)
+  inline Worker * data (void) noexcept
   {
     return workers_;
   }
@@ -209,6 +215,7 @@ struct ThreadPoolImpl
       return lhs.first > rhs.first;
     }
   };
+
   std::condition_variable cv_;
   mutable std::mutex mutex_;
 
@@ -217,9 +224,9 @@ struct ThreadPoolImpl
 
   Worker * const workers_;
 
-  index_type threads_, living_, idle_;
+  index_type threads_, living_, idle_, paused_;
 
-  std::atomic<bool> stop_;
+  std::atomic<std::uint_fast8_t> stop_;
 
   ThreadPoolImpl (const ThreadPoolImpl &) = delete;
   ThreadPoolImpl & operator= (const ThreadPoolImpl &) = delete;
@@ -249,8 +256,8 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   void restart_thread (void)
   {
     assert(!pool_.should_stop());
-    assert(!thread_.joinable());
-    thread_ = std::thread(std::reference_wrapper<Worker>(*this));
+    if (!thread_.joinable())
+      thread_ = std::thread(std::reference_wrapper<Worker>(*this));
   }
   void stop_thread (void)
   {
@@ -264,6 +271,16 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
     return &pool_ == ptr;
   }
 
+  inline bool get_paused (void) const noexcept
+  {
+    return paused_;
+  }
+
+  inline void set_paused (bool val) noexcept
+  {
+    paused_ = val;
+  }
+
   template<typename Task>
   bool push (Task && tasks);
   template<typename Task>
@@ -273,7 +290,7 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   Worker (const Worker &) = delete;
   Worker & operator= (const Worker &) = delete;
 
-  typedef uint_fast32_t index_type;
+  typedef std::uint_fast32_t index_type;
 
   //constexpr static std::size_t kModulus = 1 << kLog2Modulus;
   constexpr static std::size_t kValidShift = CHAR_BIT * sizeof(index_type) / 2;
@@ -281,11 +298,12 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   static_assert(kLog2Modulus <= kValidShift, "ThreadPool's local task queue \
 size exceeds limit of selected index type.");
 
-  inline static index_type get_distance (index_type,index_type) noexcept;
+  inline static index_type get_distance (index_type, index_type) noexcept;
   //inline static constexpr index_type get_writeable (index_type, index_type);
   inline static index_type get_valid (index_type) noexcept;
   inline static index_type get_write (index_type) noexcept;
-  inline static index_type make_back (index_type,index_type) noexcept;
+  inline static index_type make_back (index_type, index_type) noexcept;
+
   inline static index_type make_back (index_type) noexcept;
 
 
@@ -334,15 +352,16 @@ size exceeds limit of selected index type.");
 //  as part of the batch.
   static_assert(kLog2Modulus < sizeof(std::uint_fast32_t) * CHAR_BIT - 2, "The \
 behavior of the worker queue's starvation-avoidance algorithm has not yet been \
-examined in the case that the starvation-avoidance countdown is small relative \
-to the task queue.");
-  std::uint_fast32_t  countdown_ : (sizeof(std::uint_fast32_t) * CHAR_BIT - 1),
+examined in the case that the countdown variable is small relative to the task-\
+queue.");
+  std::uint_fast32_t  countdown_ : (sizeof(std::uint_fast32_t) * CHAR_BIT - 2),
 //    While a task is being executed, the front_ marker is not incremented. This
 //  avoids early claiming of a new task (which would prevent that task from
 //  being stolen), but makes the push-to-front process a bit more complicated.
 //  In particular, the push-to-front should overwrite the front when first
 //  called during an execution, but not afterward.
-                front_invalid_ : 1;
+                      front_invalid_ : 1,
+                      paused_ : 1;
 //    Need to keep the thread's handle for later joining. I could work around
 //  this, but the workaround would be less efficient.
   std::thread thread_;
@@ -356,9 +375,20 @@ THREAD_POOL_FALSE_SHARING_ALIGNMENT))) char tasks_ [kModulus*sizeof(task_type)];
 Worker::Worker (ThreadPoolImpl & pool) noexcept
   : front_(0), back_(0),
     pool_(pool),
-    countdown_(2), front_invalid_(false),
+    countdown_(2), front_invalid_(false), paused_(false),
     thread_()
 {
+}
+
+//  Only called after all workers have stopped.
+Worker::~Worker (void)
+{
+//    If this assert fails, either synchronization wasn't performed, or a task
+//  is actively running. Either way, the code would need a fix.
+  assert(!front_invalid_);
+
+//    Remove tasks without using them in any way.
+  remove_all_and([](task_type&&){});
 }
 
 //    Removes each task from a Worker and applies func to it. Note: Must
@@ -390,17 +420,6 @@ void Worker::remove_all_and (Func && func)
     std::forward<Func>(func)(remove_task(back));
   }
   back_.store(make_back(front,front), std::memory_order_release);
-}
-
-//  Only called after all workers have stopped.
-Worker::~Worker (void)
-{
-//    If this assert fails, either synchronization wasn't performed, or a task
-//  is actively running. Either way, the code would need a fix.
-  assert(!front_invalid_);
-
-//    Remove tasks without using them in any way.
-  remove_all_and([](task_type&&){});
 }
 
 typename Worker::index_type Worker::get_distance (index_type left, index_type right) noexcept
@@ -469,7 +488,7 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
     return 0;
 
 //  Maximum spin count before giving up.
-  uint_fast8_t spins = 64;
+  std::uint_fast8_t spins = 64;
 //  Lock the source queue, reserving several tasks to steal.
   source_back = source.back_.load(std::memory_order_relaxed);
   do {
@@ -593,7 +612,6 @@ bool Worker::execute (void)
 
   task_type task = remove_task(front);
 
-  assert(task != nullptr);
   front_invalid_ = true;
   task();
 
@@ -786,6 +804,8 @@ void Worker::operator() (void)
     guard.unlock();
     pool_.cv_.notify_all();
   }
+//  The thread is started after all workers are initialized; no need to wait.
+
   while (true)
   {
     if (--countdown_ == 0)
@@ -890,21 +910,27 @@ kill:
 
 
 
+////////////////////////////////////////////////////////////////////////////////
+//                              ThreadPoolImpl                                //
+////////////////////////////////////////////////////////////////////////////////
+
 ThreadPoolImpl::ThreadPoolImpl (Worker * workers, index_type threads)
   : cv_(), mutex_(),
     queue_(), time_queue_(),
     workers_(workers),
-    threads_(threads), living_(0), idle_(0),
-    stop_(false)
+    threads_(threads), living_(0), idle_(0), paused_(0),
+    stop_(0x00)
 {
   std::unique_lock<decltype(mutex_)> guard (mutex_);
   for (index_type i = 0; i < threads_; ++i)
     new(workers + i) Worker(*this);
+//    Start the threads only after all initialization is complete. The Worker's
+//  loop will need no further synchronization for safe use.
   for (index_type i = 0; i < threads_; ++i)
     workers_[i].restart_thread();
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
   cv_.wait(guard, [this](void)->bool {
-    return (living_ == threads_) || stop_.load(std::memory_order_relaxed);
+    return (living_ == threads_) || should_stop();
   });
 }
 
@@ -919,31 +945,104 @@ which it belongs.\n");
   }
 #endif
   std::unique_lock<decltype(mutex_)> guard (mutex_);
-  stop_threads(guard);
-  for (index_type i = 0; i < threads_; ++i)
+  stop_.store(0x05, std::memory_order_relaxed);
+  if (paused_ > 0)
+  {
+//    If the pool is in a "paused" state, it might be the case that one thread
+//  is still alive (and waiting for an "unpause" signal). Wake it up...
+    cv_.notify_all();
+    cv_.wait(guard, [this](void)->bool {
+      return (living_ == 0);
+    });
+    for (unsigned i = 0; i < threads_; ++i)
+      workers_[i].stop_thread();
+  } else
+    stop_threads(guard);
+
+  for (unsigned i = 0; i < threads_; ++i)
     workers_[i].~Worker();
 }
 
 //  Note: Because of the mutex, can be called from any thread at any time.
 void ThreadPoolImpl::stop_threads (std::unique_lock<decltype(mutex_)> & guard)
 {
-  stop_.store(true, std::memory_order_relaxed);
   if (idle_ > 0)
     cv_.notify_all();
   cv_.wait(guard, [this](void)->bool {
-    return (living_ == 0);
+    return (living_ == paused_) || !should_stop();
   });
+  if (should_stop()) {
+//    At this point, all threads are either dead (need to be joined) or paused
+//  (must not be joined). Take action appropriately.
+//    Note that if multiple threads are paused simultaneously, they all reach
+//  this point (one at a time, though)
+    for (unsigned i = 0; i < threads_; ++i)
+    {
+      if (!workers_[i].get_paused())
+        workers_[i].stop_thread();
+    }
+  }
+}
 
-  for (index_type i = 0; i < threads_; ++i)
-    workers_[i].stop_thread();
+void ThreadPoolImpl::halt (void)
+{
+  std::unique_lock<decltype(mutex_)> guard (mutex_);
+//    Note: Bit 0x04 is used to indicate that the destructor is ongoing. Do not
+//  interfere with it.
+  if (stop_.load(std::memory_order_relaxed) & 0x04)
+    return;
+  stop_.store(0x03, std::memory_order_relaxed);
+  if ((current_worker != nullptr) && current_worker->belongs_to(this))
+  {
+    current_worker->set_paused(true);
+    ++paused_;
+  }
+  stop_threads(guard);
+//  If the caller is part of the pool, block execution until unpaused.
+  if ((current_worker != nullptr) && current_worker->belongs_to(this))
+  {
+    cv_.wait(guard, [this] (void) -> bool {
+      return (stop_.load(std::memory_order_relaxed) & 0x02) == 0;
+    });
+    current_worker->set_paused(false);
+    --paused_;
+  }
+}
 
-  stop_.store(false, std::memory_order_release);
+//  Note: Because of the mutex, can call from any thread at any time.
+void ThreadPoolImpl::resume (void)
+{
+  std::unique_lock<decltype(mutex_)> guard (mutex_);
+
+  assert(living_ >= paused_);
+//    Note: Bit 0x04 will be used to indicate attempted destruction. Do not
+//  interfere.
+  if (stop_.load(std::memory_order_relaxed) & 0x04)
+    return;
+
+  stop_.store(0x00, std::memory_order_relaxed);
+  cv_.notify_all();
+
+  for (unsigned i = 0; i < threads_; ++i)
+    workers_[i].restart_thread();
+
+  cv_.wait(guard, [this](void)->bool {
+    return (living_ == threads_) || should_stop();
+  });
+}
+
+bool ThreadPoolImpl::is_halted (void) const
+{
+  std::lock_guard<decltype(mutex_)> guard (mutex_);
+//  Include paused tasks to give more consistent behavior.
+  return (stop_.load(std::memory_order_relaxed) & 0x02) && (paused_ == living_);
 }
 
 bool ThreadPoolImpl::is_idle (void) const
 {
   std::lock_guard<decltype(mutex_)> guard (mutex_);
-  return idle_ == living_;
+//  Include paused tasks to give more consistent behavior.
+  return (idle_ + paused_) == living_;
 }
 
 template<typename Task>
@@ -966,16 +1065,6 @@ void ThreadPoolImpl::schedule_after (const clock::duration & dur, Task && task)
 
 } //  Namespace [Anonymous]
 
-unsigned ThreadPool::get_concurrency(void) const
-{
-  return static_cast<const ThreadPoolImpl *>(impl_)->get_concurrency();
-}
-
-bool ThreadPool::is_idle (void) const
-{
-  return static_cast<const ThreadPoolImpl *>(impl_)->is_idle();
-}
-
 namespace {
 #ifndef NDEBUG
 std::atomic_flag overflow_warning_given = ATOMIC_FLAG_INIT;
@@ -985,21 +1074,27 @@ void debug_warn_overflow (void)
     std::printf("Task queue overflow (more than %zu tasks in a single worker's \
 queue). May impact performance.", ThreadPool::get_worker_capacity());
 }
-#else
-inline void debug_warn_overflow (void) { }
 #endif
 
 template<typename Task>
 void impl_schedule (Task && task, ThreadPoolImpl * impl)
 {
+#ifndef NDEBUG
+//    If a NULL task is passed, place the error message as close as possible to
+//  the error itself.
+  if (task == nullptr)
+    throw std::bad_function_call();
+#endif
   Worker * worker = current_worker;
 //  If a thread is attempting to schedule in its own pool...
   if ((worker != nullptr) && worker->belongs_to(impl))
   {
     if (worker->push(std::forward<Task>(task)))
       return;
+#ifndef NDEBUG
     else
       debug_warn_overflow();
+#endif
   }
   impl->schedule_overflow<Task>(std::forward<Task>(task));
 }
@@ -1008,14 +1103,22 @@ void impl_schedule (Task && task, ThreadPoolImpl * impl)
 template<typename Task>
 void impl_schedule_subtask (Task && task, ThreadPoolImpl * impl)
 {
+#ifndef NDEBUG
+//    If a NULL task is passed, place the error message as close as possible to
+//  the error itself.
+  if (task == nullptr)
+    throw std::bad_function_call();
+#endif
   Worker * worker = current_worker;
 //  If a thread is attempting to schedule in its own pool, take the fast path.
   if ((worker != nullptr) && worker->belongs_to(impl))
   {
     if (worker->push_front(std::forward<Task>(task)))
       return;
+#ifndef NDEBUG
     else
       debug_warn_overflow();
+#endif
   }
   impl->schedule_overflow(std::forward<Task>(task));
 }
@@ -1027,44 +1130,25 @@ void impl_schedule_after (const std::chrono::steady_clock::duration & dur,
   if (dur <= std::chrono::steady_clock::duration(0))
     impl_schedule(task, impl);
   else
+  {
+#ifndef NDEBUG
+//    If a NULL task is passed, place the error message as close as possible to
+//  the error itself.
+    if (task == nullptr)
+      throw std::bad_function_call();
+#endif
     impl->schedule_after<Task>(dur, std::forward<Task>(task));
+  }
 }
 }
 
-//  Schedules a task normally, at the back of the queue.
-void ThreadPool::schedule (const task_type & task)
-{
-  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
-}
-void ThreadPool::schedule (task_type && task)
-{
-  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
-}
 
-//  Schedules a task normally, at the back of the queue.
-void ThreadPool::sched_impl(const duration & dur, const task_type & task)
-{
-  impl_schedule_after(dur, task, static_cast<ThreadPoolImpl*>(impl_));
-}
-void ThreadPool::sched_impl(const duration & dur, task_type && task)
-{
-  impl_schedule_after(dur, task, static_cast<ThreadPoolImpl*>(impl_));
-}
 
-//  Schedule at the front of the queue, if in fast path.
-void ThreadPool::schedule_subtask (const task_type & task)
-{
-  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
-}
-void ThreadPool::schedule_subtask (task_type && task)
-{
-  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
-}
 
-std::size_t ThreadPool::get_worker_capacity (void)
-{
-  return kModulus - 1;
-}
+
+////////////////////////////////////////////////////////////////////////////////
+//                                ThreadPool                                  //
+////////////////////////////////////////////////////////////////////////////////
 
 ThreadPool::ThreadPool (unsigned threads)
   : impl_(nullptr)
@@ -1076,10 +1160,9 @@ ThreadPool::ThreadPool (unsigned threads)
     if (threads < 2)
       threads = 2;
   }
-//    Ensure that the specified number of threads doesn't exceed that which the
-//  implementation is designed to hold.
-  if (threads > static_cast<ThreadPoolImpl::index_type>(-1))
-    threads = static_cast<ThreadPoolImpl::index_type>(-1);
+  typedef decltype(static_cast<ThreadPoolImpl*>(impl_)->get_concurrency()) thread_counter_type;
+  if (threads > static_cast<thread_counter_type>(-1)) //  Effectively UINT_MAX
+    threads = static_cast<thread_counter_type>(-1);
 //    Alignment change during Worker allocation is an integer multiple of
 //  alignof(Worker). If (alignof(Worker) >= alignof(ThreadPoolImpl)), then
 //  the second align will not do anything, and the problem is solved. Otherwise,
@@ -1124,4 +1207,62 @@ ThreadPool::~ThreadPool (void)
   void * memory = *reinterpret_cast<void**>(impl + 1);
   impl->~ThreadPoolImpl();
   std::free(memory);
+}
+
+unsigned ThreadPool::get_concurrency(void) const
+{
+  return static_cast<const ThreadPoolImpl *>(impl_)->get_concurrency();
+}
+
+bool ThreadPool::is_idle (void) const
+{
+  return static_cast<const ThreadPoolImpl *>(impl_)->is_idle();
+}
+
+//  Schedules a task normally, at the back of the queue.
+void ThreadPool::schedule (const task_type & task)
+{
+  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+void ThreadPool::schedule (task_type && task)
+{
+  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+
+//  Schedules a task normally, at the back of the queue.
+void ThreadPool::sched_impl(const duration & dur, const task_type & task)
+{
+  impl_schedule_after(dur, task, static_cast<ThreadPoolImpl*>(impl_));
+}
+void ThreadPool::sched_impl(const duration & dur, task_type && task)
+{
+  impl_schedule_after(dur, task, static_cast<ThreadPoolImpl*>(impl_));
+}
+
+//  Schedule at the front of the queue, if in fast path.
+void ThreadPool::schedule_subtask (const task_type & task)
+{
+  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+void ThreadPool::schedule_subtask (task_type && task)
+{
+  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
+}
+
+std::size_t ThreadPool::get_worker_capacity (void)
+{
+  return kModulus - 1;
+}
+
+void ThreadPool::halt (void)
+{
+  static_cast<ThreadPoolImpl*>(impl_)->halt();
+}
+void ThreadPool::resume (void)
+{
+  static_cast<ThreadPoolImpl*>(impl_)->resume();
+}
+bool ThreadPool::is_halted (void) const
+{
+  return static_cast<const ThreadPoolImpl *>(impl_)->is_halted();
 }

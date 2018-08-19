@@ -10,4 +10,8 @@ The test application will, when run, perform the following:
 * Assign tasks to a `ThreadPool`.
 * Ensure that `ThreadPool`s idle when all tasks are complete, to avoid excessive CPU use. If it fails to idle quickly enough after completion, or does not complete within a reasonable period of time, the test application returns non-zero.
 * Restart an idling `ThreadPool` for a second round of tasks.
+* Test delayed scheduling of tasks.
+* Ensure that an active `ThreadPool` can be safely destroyed (losing its tasks in the process).
 * Measure how well tasks are balanced, by counting the minimum, maximum, and average number of tasks performed by each worker thread. Given that the tasks are (mostly) homogeneous, good balance is indicated by similarity of these numbers.
+* Pause and resume a `ThreadPool`.
+* Destroy a paused `ThreadPool`.
