@@ -31,7 +31,7 @@
 
 #include <cstdlib>            //  For std::malloc and std::free
 #include <memory>             //  For std::align
-#include <climits>            //  For CHAR_BIT
+#include <limits>             //  For std::numeric_limits
 
 #include <cassert>            //  For debugging: Fail deadly.
 #ifndef NDEBUG
@@ -293,10 +293,10 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   typedef std::uint_fast32_t index_type;
 
   //constexpr static std::size_t kModulus = 1 << kLog2Modulus;
-  constexpr static std::size_t kValidShift = CHAR_BIT * sizeof(index_type) / 2;
+  constexpr static std::size_t kValidShift = std::numeric_limits<index_type>::digits / 2;
   constexpr static index_type kWriteMask = ~(~static_cast<index_type>(0) << kValidShift);
-  static_assert(kLog2Modulus <= kValidShift, "ThreadPool's local task queue \
-size exceeds limit of selected index type.");
+  static_assert(kLog2Modulus <= kValidShift,                                   \
+    "ThreadPool's local task queue size exceeds limit of selected index type.");
 
   inline static index_type get_distance (index_type, index_type) noexcept;
   //inline static constexpr index_type get_writeable (index_type, index_type);
@@ -350,11 +350,11 @@ size exceeds limit of selected index type.");
 //  records the remaining size of the batch. A successfully scheduled subtask
 //  will increment this to ensure the originally scheduled tasks are completed
 //  as part of the batch.
-  static_assert(kLog2Modulus < sizeof(std::uint_fast32_t) * CHAR_BIT - 2, "The \
-behavior of the worker queue's starvation-avoidance algorithm has not yet been \
-examined in the case that the countdown variable is small relative to the task-\
-queue.");
-  std::uint_fast32_t  countdown_ : (sizeof(std::uint_fast32_t) * CHAR_BIT - 2),
+  static_assert(kLog2Modulus < std::numeric_limits<std::uint_fast32_t>::digits - 2,
+"The behavior of the worker queue's starvation-avoidance algorithm has not yet \
+been examined in the case that the countdown variable is small relative to the \
+task-queue.");
+  std::uint_fast32_t  countdown_ : (std::numeric_limits<std::uint_fast32_t>::digits - 2),
 //    While a task is being executed, the front_ marker is not incremented. This
 //  avoids early claiming of a new task (which would prevent that task from
 //  being stolen), but makes the push-to-front process a bit more complicated.
@@ -1161,8 +1161,8 @@ ThreadPool::ThreadPool (unsigned threads)
       threads = 2;
   }
   typedef decltype(static_cast<ThreadPoolImpl*>(impl_)->get_concurrency()) thread_counter_type;
-  if (threads > static_cast<thread_counter_type>(-1)) //  Effectively UINT_MAX
-    threads = static_cast<thread_counter_type>(-1);
+  if (threads > std::numeric_limits<thread_counter_type>::max())
+    threads = std::numeric_limits<thread_counter_type>::max();
 //    Alignment change during Worker allocation is an integer multiple of
 //  alignof(Worker). If (alignof(Worker) >= alignof(ThreadPoolImpl)), then
 //  the second align will not do anything, and the problem is solved. Otherwise,
