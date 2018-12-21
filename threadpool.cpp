@@ -90,7 +90,7 @@ static_assert(is_pow2(THREAD_POOL_FALSE_SHARING_ALIGNMENT), "Alignments must be\
 template<class Integer1, class Integer2>
 constexpr typename std::common_type<Integer1, Integer2>::type min (Integer1 x, Integer2 y) noexcept
 {
-  typedef typename std::common_type<Integer1, Integer2>::type result_type;
+  using result_type = decltype(min(x,y));
   return (static_cast<result_type>(x) < static_cast<result_type>(y)) ? x : y;
 }
 
@@ -99,7 +99,7 @@ constexpr typename std::common_type<Integer1, Integer2>::type min (Integer1 x, I
 template<class Integer1, class Integer2>
 constexpr typename std::common_type<Integer1, Integer2>::type max (Integer1 x, Integer2 y) noexcept
 {
-  typedef typename std::common_type<Integer1, Integer2>::type result_type;
+  using result_type = decltype(max(x,y));
   return (static_cast<result_type>(x) < static_cast<result_type>(y)) ? y : x;
 }
 
@@ -156,17 +156,17 @@ struct ThreadPoolImpl
   }
 
 
-  void notify_if_idle (void)
+  inline void notify_if_idle (void) noexcept
   {
     if (idle_ > 0)
       cv_.notify_one();
   }
-  bool might_have_task (void) const
+  inline bool might_have_task (void) const
   {
     return !queue_.empty();
   }
 //  Note: Does no synchronization of its own.
-  bool has_task (void) const
+  inline bool has_task (void) const
   {
     return !queue_.empty();
   }
@@ -180,14 +180,20 @@ struct ThreadPoolImpl
   {
     while ((!time_queue_.empty()) && (clock::now() >= time_queue_.top().first))
     {
-      queue_.emplace(std::move(time_queue_.top().second));
-      time_queue_.pop();
+      //try {
+        queue_.emplace(std::move(time_queue_.top().second));
+        time_queue_.pop();
+      /*} catch (...) {
+//  Task was invalidated. Needs to be removed to maintain consistent state.
+        time_queue_.pop();
+        throw;  //  Exits thread, calls std::terminate
+      }*/
     }
   }
 //  Note: Does no synchronization of its own.
   task_type extract_task (void)
   {
-    assert(!queue_.empty());
+    assert(!queue_.empty() && "Cannot retrieve a task from an empty queue.");
     task_type result = std::move(queue_.front());
     queue_.pop();
     return std::move(result);
@@ -267,17 +273,17 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   void restart_thread (void)
   {
     assert(!pool_.should_stop());
-    if (!thread_.joinable())
+    if (!thread_.joinable())  //  noexcept
       thread_ = std::thread(std::reference_wrapper<Worker>(*this));
   }
   void stop_thread (void)
   {
     assert(pool_.should_stop());
-    if (thread_.joinable())
+    if (thread_.joinable()) //  noexcept
       thread_.join();
   }
 
-  inline bool belongs_to (ThreadPoolImpl * ptr) const noexcept
+  inline bool belongs_to (ThreadPoolImpl const * ptr) const noexcept
   {
     return &pool_ == ptr;
   }
@@ -294,6 +300,7 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
 
   template<typename Task>
   bool push (Task && tasks);
+
   template<typename Task>
   bool push_front (Task && tasks);
 
@@ -309,21 +316,43 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   static_assert(kLog2Modulus <= kValidShift,                                   \
     "ThreadPool's local task queue size exceeds limit of selected index type.");
 
-  inline static index_type get_distance (index_type, index_type) noexcept;
-  //inline static constexpr index_type get_writeable (index_type, index_type);
-  inline static index_type get_valid (index_type) noexcept;
-  inline static index_type get_write (index_type) noexcept;
-  inline static index_type make_back (index_type, index_type) noexcept;
+  inline static constexpr
+    index_type get_distance (index_type left, index_type right) noexcept
+  {
+    return (right - left + kModulus) % kModulus;
+  }
 
-  inline static index_type make_back (index_type) noexcept;
+  inline static constexpr index_type get_valid (index_type b) noexcept
+  {
+    return b >> kValidShift;
+  }
+
+  inline static constexpr index_type get_write (index_type b) noexcept
+  {
+    static_assert((kWriteMask >> kValidShift) == 0, "WRITE and VALID regions must not intersect.");
+    return b & kWriteMask;
+  }
+
+  inline static constexpr
+    index_type make_back (index_type write, index_type valid) noexcept
+  {
+    return write | (valid << kValidShift);
+  }
+
+  inline static constexpr index_type make_back (index_type write) noexcept
+  {
+    return write | (write << kValidShift);
+  }
+
+  index_type count_tasks (void) const noexcept;
 
 
   unsigned steal (void);
-  unsigned steal_from (Worker & source, unsigned divisor);
-  bool pop (task_type & task);
+  unsigned steal_from (Worker & source, unsigned divisor) noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_constructible<task_type>::value);
+  bool pop (task_type & task) noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_assignable<task_type>::value);
   unsigned push_front(ThreadPoolImpl &, unsigned number);
   bool execute (void);
-  index_type count_tasks (void) const;
+  inline void post_execute (void) noexcept;
   void refresh_tasks (ThreadPoolImpl &, unsigned number);
 
 /// \brief  Activates a task slot within the queue, and fills it appropriately.
@@ -350,7 +379,7 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   }
 
   template<typename Func>
-  void remove_all_and (Func && func);
+  void remove_all_and (Func const & func);
 
 //  These store information about the current state of the deque.
 //  -   front_ is modified only by the Worker's own thread. Reads and writes
@@ -418,59 +447,39 @@ Worker::~Worker (void)
 
 //    Removes each task from a Worker and applies func to it. Note: Must
 //  not be called before the Worker's thread is fully stopped.
-template<typename Func>
-void Worker::remove_all_and (Func && func)
+/// \note Has exactly one possibly-throwing statement.
+template<class Func>
+void Worker::remove_all_and (Func const & func)
 {
-  index_type front = front_.load(std::memory_order_relaxed);
   index_type back = back_.load(std::memory_order_relaxed);
 
 //    For safety, block stealing during this. Note: Won't block the worker that
 //  is being destroyed.
   do {
-    back = make_back(get_valid(back), get_valid(back));
-    if (back_.compare_exchange_weak(back, make_back(1, 0),
-                                    std::memory_order_acquire,
-                                    std::memory_order_relaxed))
-     break;
-  } while (true);
+    back = make_back(get_valid(back));
+  } while (!back_.compare_exchange_weak(back, make_back(1, 0),
+                    std::memory_order_acquire, std::memory_order_relaxed));
 
 //  If the worker is running a task, something is VERY wrong.
-  assert(!front_invalid_);
+  assert(!front_invalid_ && "The worker is still running a task!");
 
   back = get_valid(back);
 
-  front = front_.load(std::memory_order_acquire);
-  while (front != back) {
-    back = (back - 1 + kModulus) % kModulus;
-    std::forward<Func>(func)(remove_task(back));
+  index_type front = front_.load(std::memory_order_acquire);
+  try {
+    while (front != back) {
+      back = (back - 1 + kModulus) % kModulus;
+//  Possibly-throwing:
+      func(remove_task(back));
+    }
+  } catch (...) {
+    while (front != back) {
+      back = (back - 1 + kModulus) % kModulus;
+      remove_task(back);
+    }
+    throw;
   }
-  back_.store(make_back(front,front), std::memory_order_release);
-}
-
-typename Worker::index_type Worker::get_distance (index_type left, index_type right) noexcept
-{
-  return (right - left + kModulus) % kModulus;
-}
-
-typename Worker::index_type Worker::get_valid (index_type b) noexcept
-{
-  return b >> kValidShift;
-}
-
-typename Worker::index_type Worker::get_write (index_type b) noexcept
-{
-  static_assert((kWriteMask >> kValidShift) == 0, "WRITE and VALID regions must not intersect.");
-  return b & kWriteMask;
-}
-
-typename Worker::index_type Worker::make_back (index_type write, index_type valid) noexcept
-{
-  return write | (valid << kValidShift);
-}
-
-typename Worker::index_type Worker::make_back (index_type write) noexcept
-{
-  return write | (write << kValidShift);
+  back_.store(make_back(front), std::memory_order_release);
 }
 
 //  Work-stealing will occur as follows:
@@ -496,14 +505,16 @@ typename Worker::index_type Worker::make_back (index_type write) noexcept
 
 //    Steals approximately [available] / [divisor] tasks from source, if
 //  possible. Returns number of successfully stolen tasks.
+/// \note noexcept if place_task and remove_task are both noexcept.
 unsigned Worker::steal_from (Worker & source, unsigned divisor)
+    noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_constructible<task_type>::value)
 {
   index_type this_front,    this_back,    writeable, stolen,
               source_front, source_back,  source_valid, source_write;
 //  Worker::steal_from may only be called from the Worker's owned thread.
-  assert(std::this_thread::get_id() == thread_.get_id());
-  assert(this != &source);
-  assert(!front_invalid_);
+  assert(std::this_thread::get_id() == thread_.get_id() && "Worker::steal_from may only be called from the Worker's own thread.");
+  assert(this != &source && "Worker may not steal from itself.");
+  assert(!front_invalid_ && "Worker cannot steal while it is performing a task.");
 
   this_front = front_.load(std::memory_order_relaxed);
   this_back = back_.load(std::memory_order_acquire);
@@ -512,12 +523,13 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
   if (writeable == 0)
     return 0;
 
-//  Maximum spin count before giving up.
+//  Maximum number of times to attempt to lock the victim before giving up.
   std::uint_fast8_t spins = 64;
 //  Lock the source queue, reserving several tasks to steal.
   source_back = source.back_.load(std::memory_order_relaxed);
   do {
     source_valid = get_valid(source_back);
+//  Already locked. Better to give up immediately, and try a different victim.
     if (source_valid != get_write(source_back))
       return 0;
     source_front = source.front_.load(std::memory_order_relaxed);
@@ -533,9 +545,9 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
     source_write = (source_valid - stolen + kModulus) % kModulus;
 
     if (source.back_.compare_exchange_weak(source_back,
-                                           make_back(source_write, source_valid),
-                                           std::memory_order_acq_rel,
-                                           std::memory_order_relaxed))
+                              make_back(source_write, source_valid),
+                              std::memory_order_acq_rel,
+                              std::memory_order_relaxed))
       break;
 //  Spun too long. Better to try a different victim than lock forever.
     if (--spins == 0)
@@ -574,8 +586,8 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
 
 #ifndef NDEBUG
   assert(source_write != source_valid);
-  source_front = source.front_.load(std::memory_order_relaxed);
-  assert(get_distance(source_front, source_write) <= get_distance(source_front, source_valid));
+  auto test_front = source.front_.load(std::memory_order_relaxed);
+  assert(get_distance(test_front, source_write) <= get_distance(test_front, source_valid));
 #endif
   do {
     source_valid = (source_valid - 1 + kModulus) % kModulus;
@@ -591,11 +603,11 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
 //    Removes a task from the front of the queue, if possible. Returns true or
 //  false for success or failure, respectively.
 bool Worker::pop (task_type & task)
+  noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_assignable<task_type>::value)
 {
   index_type front, back, readable;
 
-//  Worker::pop may only be called from the Worker's owned thread.
-  assert(std::this_thread::get_id() == thread_.get_id());
+  assert(std::this_thread::get_id() == thread_.get_id() && "Worker::pop may only be called from the Worker's own thread.");
 
   front = front_.load(std::memory_order_relaxed);
   back = back_.load(std::memory_order_acquire);
@@ -606,6 +618,7 @@ bool Worker::pop (task_type & task)
 //  or may not be something to read.
   if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
     return false;
+
   task = remove_task(front);
 
   front_.store((front + 1) % kModulus, std::memory_order_relaxed);
@@ -620,10 +633,8 @@ bool Worker::execute (void)
 {
   index_type front, back, readable;
 
-  assert(!front_invalid_);
-
-//  Worker::execute may only be called from the Worker's owned thread.
-  assert(std::this_thread::get_id() == thread_.get_id());
+  assert(!front_invalid_ && "Can't execute a task while already executing a different task.");
+  assert(std::this_thread::get_id() == thread_.get_id() && "Worker::execute may only be called from the Worker's own thread.");
 
   front = front_.load(std::memory_order_relaxed);
   back = back_.load(std::memory_order_acquire);
@@ -635,20 +646,35 @@ bool Worker::execute (void)
   if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
     return false;
 
-  task_type task = remove_task(front);
-
   front_invalid_ = true;
-  task();
-
+  //try {
+//  Potentially-throwing.
+    task_type task = remove_task(front);
+//  Potentially-throwing.
+    task();
+  /*} catch (...) {
+//    Restore queue to validity, though ensure that the task that was pulled is
+//  no longer in the queue.
+    if (front_invalid_)
+      post_execute();
+    throw;  //  Exits thread, calls std::terminate
+  }*/
+/// \todo Find a good way to unify this with the other validation.
+//    If the slot was not already overwritten (eg. by the task pushing to the
+//  task-queue), need to adjust the queue size.
   if (front_invalid_)
-  {
-    front_invalid_ = false;
-    front = front_.load(std::memory_order_relaxed);
-    front_.store((front + 1) % kModulus, std::memory_order_relaxed);
-//  I need to release back_ so that the write to front_ is visible to thieves.
-    back_.fetch_or(0, std::memory_order_release);
-  }
+    post_execute();
   return true;
+}
+
+void Worker::post_execute (void) noexcept
+{
+  assert(front_invalid_ && "Must only be called by execute as a cleanup.");
+  front_invalid_ = false;
+  auto new_front = front_.load(std::memory_order_relaxed);
+  front_.store((new_front + 1) % kModulus, std::memory_order_relaxed);
+//  I need to release back_ so that the write to front_ is visible to thieves.
+  back_.fetch_or(0, std::memory_order_release);
 }
 
 //  Pulls some tasks into the local queue from the central queue
@@ -722,8 +748,7 @@ bool Worker::push_front (Task && task)
 {
   index_type front, back;
 
-//  Worker::push_front may only be called from the Worker's owned thread.
-  assert(std::this_thread::get_id() == thread_.get_id());
+  assert(std::this_thread::get_id() == thread_.get_id() && "Worker::push_front may only be called from the Worker's owned thread.");
 
   front = front_.load(std::memory_order_relaxed);
   back = back_.load(std::memory_order_acquire);
@@ -750,8 +775,7 @@ unsigned Worker::push_front (ThreadPoolImpl & tasks, unsigned number)
 {
   index_type front, back, written, n;
 
-//  Worker::push_front may only be called from the Worker's owned thread.
-  assert(std::this_thread::get_id() == thread_.get_id());
+  assert(std::this_thread::get_id() == thread_.get_id() && "Worker::push_front may only be called from the Worker's owned thread.");
   if (!tasks.has_task())
     return 0;
 
@@ -769,7 +793,6 @@ unsigned Worker::push_front (ThreadPoolImpl & tasks, unsigned number)
   n = written;
   do {
     front = (front - 1 + kModulus) % kModulus;
-    //assert(tasks.front() != nullptr);
     place_task(front, std::move(tasks.extract_task()));
     if (!tasks.has_task())
     {
@@ -783,7 +806,7 @@ unsigned Worker::push_front (ThreadPoolImpl & tasks, unsigned number)
 }
 
 //  Returns an estimate of the number of tasks currently in the queue.
-typename Worker::index_type Worker::count_tasks (void) const
+typename Worker::index_type Worker::count_tasks (void) const noexcept
 {
   index_type front = front_.load(std::memory_order_relaxed);
   index_type back = back_.load(std::memory_order_relaxed);
@@ -793,7 +816,6 @@ typename Worker::index_type Worker::count_tasks (void) const
 //  Attempts to steal work from other worker threads in the same pool.
 unsigned Worker::steal (void)
 {
-  //return 0;
   unsigned source = front_.load(std::memory_order_relaxed);
   std::hash<typename std::thread::id> hasher;
   source += hasher(thread_.get_id());
@@ -947,10 +969,16 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, index_type threads)
     stop_(0x00)
 {
   std::unique_lock<decltype(mutex_)> guard (mutex_);
+//  Construct the workers, after some safety-checks.
+  static_assert(std::is_nothrow_constructible<Worker, ThreadPoolImpl &>::value,\
+    "This loop is only exception-safe if Worker construction is non-throwing");
   for (index_type i = 0; i < threads_; ++i)
     new(workers + i) Worker(*this);
 //    Start the threads only after all initialization is complete. The Worker's
 //  loop will need no further synchronization for safe use.
+/// \todo Identify proper response if this throws an exception. Possible options
+///   include throwing an exception and starting the pool with fewer than the
+///   desired number of threads.
   for (index_type i = 0; i < threads_; ++i)
     workers_[i].restart_thread();
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
@@ -1046,7 +1074,7 @@ void ThreadPoolImpl::resume (void)
     return;
 
   stop_.store(0x00, std::memory_order_relaxed);
-  cv_.notify_all();
+  cv_.notify_all(); //  noexcept
 
   for (unsigned i = 0; i < threads_; ++i)
     workers_[i].restart_thread();
@@ -1088,9 +1116,8 @@ void ThreadPoolImpl::schedule_after (const clock::duration & dur, Task && task)
   notify_if_idle();
 }
 
-} //  Namespace [Anonymous]
 
-namespace {
+
 #ifndef NDEBUG
 std::atomic_flag overflow_warning_given = ATOMIC_FLAG_INIT;
 void debug_warn_overflow (void)
@@ -1165,7 +1192,7 @@ void impl_schedule_after (const std::chrono::steady_clock::duration & dur,
     impl->schedule_after<Task>(dur, std::forward<Task>(task));
   }
 }
-}
+} //  Namespace [anonymous]
 
 
 
@@ -1197,32 +1224,37 @@ ThreadPool::ThreadPool (unsigned threads)
                  max(alignof(ThreadPoolImpl), alignof(Worker)) + sizeof(void**);
   void * memory = std::malloc(space);
   if (memory == nullptr)
-    goto fail_l1;
+    goto fail;
   {
     using std::align;
     void * ptr = memory;
 
 //  Allocate space for a block of worker threads
     if (!align(alignof(Worker), threads * sizeof(Worker), ptr, space))
-      goto fail_l2;
+      goto fail;
     Worker * workers = static_cast<Worker*>(ptr);
     ptr = workers + threads;
 
 //  Allocate space for the controller.
     if (!align(alignof(ThreadPoolImpl), sizeof(ThreadPoolImpl), ptr, space))
-      goto fail_l2;
+      goto fail;
     ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(ptr);
     ptr = impl + 1;
 
+    try {
+      new(impl) ThreadPoolImpl(workers, threads);
+    } catch (...) {
+      std::free(memory);
+      throw;
+    }
+
     impl_ = impl;
-    new(impl) ThreadPoolImpl(workers, threads);
 
     *reinterpret_cast<void**>(ptr) = memory;
   }
   return;
-fail_l2:
+fail:
   std::free(memory);
-fail_l1:
   throw std::bad_alloc();
 }
 
