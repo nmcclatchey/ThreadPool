@@ -32,6 +32,7 @@
 #include <cstdlib>            //  For std::malloc and std::free
 #include <memory>             //  For std::align
 #include <limits>             //  For std::numeric_limits
+#include <type_traits>        //  Detect conditions needed for noexcept.
 #include <utility>            //  For std::declval
 
 #include <cassert>            //  For debugging: Fail deadly.
@@ -100,6 +101,15 @@ constexpr typename std::common_type<Integer1, Integer2>::type max (Integer1 x, I
 {
   typedef typename std::common_type<Integer1, Integer2>::type result_type;
   return (static_cast<result_type>(x) < static_cast<result_type>(y)) ? y : x;
+}
+
+/// \brief  Determines an alignment that minimizes the number of times that a
+///   densely-packed array of `T` would have an instance of `T` straddling a
+///   cache-line border.
+template<class T>
+constexpr std::size_t get_align (void)
+{
+  return max(alignof(T),min(lsb(sizeof(T)),THREAD_POOL_FALSE_SHARING_ALIGNMENT));
 }
 
 /// \brief  Provides O(1) access to the Worker that is handling the current
@@ -316,19 +326,27 @@ struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
   index_type count_tasks (void) const;
   void refresh_tasks (ThreadPoolImpl &, unsigned number);
 
+/// \brief  Activates a task slot within the queue, and fills it appropriately.
   template<typename Task>
   void place_task (index_type location, Task && task)
+    noexcept(std::is_nothrow_constructible<task_type, Task &&>::value)
   {
-    task_type * task_array = reinterpret_cast<task_type *>(tasks_);
-    new(task_array + location) task_type(std::forward<Task>(task));
+    static_assert(std::is_trivially_destructible<OptionalTask::Empty>::value,
+                  "Implicit destruction is used here, and thus is required here.");
+    new(std::addressof(tasks_[location].task_)) task_type(std::forward<Task>(task));
   }
+/// \brief  Deactivates a task slot, and returns what was inside before the
+///   deactivation.
   task_type remove_task (index_type location)
+    noexcept(std::is_nothrow_destructible<task_type>::value)
   {
-    task_type * task_array = reinterpret_cast<task_type *>(tasks_);
-    assert(task_array[location] != nullptr);
-    task_type result = std::move(task_array[location]);
-    task_array[location].~task_type();
-    return std::move(result);
+    task_type result = std::move(tasks_[location].task_);
+    tasks_[location].task_.~task_type();
+//  Set the new active member of the union. Should be a no-op.
+    static_assert(std::is_trivial<OptionalTask::Empty>::value,
+                  "The default value for implicit optional values must be trivial.");
+    tasks_[location].empty_ = OptionalTask::Empty();
+    return result;  //  I'd move, but copy elision is faster.
   }
 
   template<typename Func>
@@ -369,8 +387,14 @@ task-queue.");
 //    Task queue. When information about the cache is available, allocate so
 //  that tasks aren't split across cache lines. Note: If splitting is
 //  inevitable, make a best-effort attempt to reduce it.
-  alignas(max(alignof(task_type), min(lsb(sizeof(task_type)),\
-THREAD_POOL_FALSE_SHARING_ALIGNMENT))) char tasks_ [kModulus*sizeof(task_type)];
+  union OptionalTask {
+    struct Empty {} empty_;
+    task_type task_;
+
+    OptionalTask (void) noexcept : empty_() {}
+    ~OptionalTask (void) noexcept {}
+  };
+  alignas(get_align<task_type>()) OptionalTask tasks_ [kModulus];
 };
 
 Worker::Worker (ThreadPoolImpl & pool) noexcept
