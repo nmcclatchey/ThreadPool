@@ -32,6 +32,7 @@
 #include <cstdlib>            //  For std::malloc and std::free
 #include <memory>             //  For std::align
 #include <limits>             //  For std::numeric_limits
+#include <utility>            //  For std::declval
 
 #include <cassert>            //  For debugging: Fail deadly.
 #ifndef NDEBUG
@@ -1160,7 +1161,7 @@ ThreadPool::ThreadPool (unsigned threads)
     if (threads < 2)
       threads = 2;
   }
-  typedef decltype(static_cast<ThreadPoolImpl*>(impl_)->get_concurrency()) thread_counter_type;
+  using thread_counter_type = decltype(std::declval<ThreadPoolImpl>().get_concurrency());
   if (threads > std::numeric_limits<thread_counter_type>::max())
     threads = std::numeric_limits<thread_counter_type>::max();
 //    Alignment change during Worker allocation is an integer multiple of
@@ -1205,6 +1206,9 @@ ThreadPool::~ThreadPool (void)
 {
   ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
   void * memory = *reinterpret_cast<void**>(impl + 1);
+
+  static_assert(noexcept(std::declval<ThreadPoolImpl>().~ThreadPoolImpl()),    \
+"ThreadPool's destructor assumes no exceptions from that of ThreadPoolImpl.");
   impl->~ThreadPoolImpl();
   std::free(memory);
 }
