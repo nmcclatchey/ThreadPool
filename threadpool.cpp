@@ -181,7 +181,10 @@ struct ThreadPoolImpl
 //  Note: Does no synchronization of its own.
   void update_tasks (void)
   {
-    while ((!time_queue_.empty()) && (clock::now() >= time_queue_.top().first))
+    if (time_queue_.empty())
+      return;
+    auto time_now = clock::now();
+    while (time_now >= time_queue_.top().first)
     {
       //try {
         queue_.emplace(std::move(time_queue_.top().second));
@@ -191,6 +194,8 @@ struct ThreadPoolImpl
         time_queue_.pop();
         throw;  //  Exits thread, calls std::terminate
       }*/
+      if (time_queue_.empty())
+        break;
     }
   }
 //  Note: Does no synchronization of its own.
