@@ -40,17 +40,20 @@
 #include <cstdio>             //  For debugging: Warn on task queue overflow.
 #endif
 
-#ifndef THREAD_POOL_FALSE_SHARING_ALIGNMENT
-#if false && (__cplusplus >= 201703L)
-//  Note: Not yet in GCC.
-#include <new>                //  For alignment purposes.
-#define THREAD_POOL_FALSE_SHARING_ALIGNMENT std::hardware_destructive_interference_size
-#else
-#define THREAD_POOL_FALSE_SHARING_ALIGNMENT 64
-#endif
+#if (__cplusplus >= 201703L) && !defined(THREAD_POOL_FALSE_SHARING_ALIGNMENT)
+#include <new>
 #endif
 
 namespace {
+#ifdef THREAD_POOL_FALSE_SHARING_ALIGNMENT
+//  If a user has supplied a false-sharing alignment, use it.
+constexpr std::size_t kFalseSharingAlignment = THREAD_POOL_FALSE_SHARING_ALIGNMENT;
+#elif defined(__cpp_lib_hardware_interference_size) && (__cpp_lib_hardware_interference_size >= 201703L)
+constexpr std::size_t kFalseSharingAlignment = std::hardware_destructive_interference_size;
+#else
+//  No hints? Use a typical cache line size.
+constexpr std::size_t kFalseSharingAlignment = 64;
+#endif
 //  Forward-declarations
 struct Worker;
 struct ThreadPoolImpl;
@@ -82,8 +85,8 @@ constexpr Integer is_pow2 (Integer x) noexcept
   return ((x - 1) & x) == 0;
 }
 
-static_assert(is_pow2(THREAD_POOL_FALSE_SHARING_ALIGNMENT), "Alignments must be\
- integer powers of 2.");
+static_assert(is_pow2(kFalseSharingAlignment),
+              "Alignments must be integer powers of 2.");
 
 /// \brief  Exactly what it says on the tin. I'd use `std::min`, but that's not
 ///   `constexpr` until C++14.
@@ -109,7 +112,7 @@ constexpr typename std::common_type<Integer1, Integer2>::type max (Integer1 x, I
 template<class T>
 constexpr std::size_t get_align (void)
 {
-  return max(alignof(T),min(lsb(sizeof(T)),THREAD_POOL_FALSE_SHARING_ALIGNMENT));
+  return max(alignof(T), min(lsb(sizeof(T)), kFalseSharingAlignment));
 }
 
 /// \brief  Provides O(1) access to the Worker that is handling the current
@@ -261,7 +264,7 @@ struct ThreadPoolImpl
 //  -   For various reasons, it is possible for the front marker to be between
 //    the write and valid pte markers. In such a case, the already-claimed task
 //    may be read, but no further tasks will be read, even if claimed.
-struct alignas(THREAD_POOL_FALSE_SHARING_ALIGNMENT) Worker
+struct alignas(kFalseSharingAlignment) Worker
 {
   typedef typename ThreadPool::task_type task_type;
 
