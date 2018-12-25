@@ -239,7 +239,7 @@ int main()
       alive_count = 0;
       for (unsigned n = 0; n < 16; ++n)
         pool.schedule([&pool](void) { stay_active(pool); });
-      pool.schedule([&pool](void) { pool.halt(); });
+      pool.schedule([&pool](void) { stay_active(pool); pool.halt(); });
       cv.wait(guard, [](void)->bool { return one_is_active; });
     }
     LOG("\t\t%s","Done. Tasks scheduled successfully.");
