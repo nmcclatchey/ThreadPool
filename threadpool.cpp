@@ -16,21 +16,8 @@
 #include <queue>              //  For central task queue
 #include <cstdint>            //  Fixed-width integer types.
 
-#if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
-#include <thread>             //  For threads. Duh.
-#include <mutex>              //  For locking of central queue.
-#include <condition_variable> //  Let threads sleep instead of spin when idle.
-#else
-//    This toolchain-specific workaround allows ThreadPool to be used with
-//  MinGW-w64 even without linking the winpthreads library. If you lack these
-//  headers, you can find them at https://github.com/nmcclatchey/mingw-std-threads .
-#include "mingw.thread.h"
-#include "mingw.mutex.h"
-#include "mingw.condition_variable.h"
-#endif
-
 #include <cstdlib>            //  For std::malloc and std::free
-#include <memory>             //  For std::align
+#include <memory>             //  For std::align and std::unique_ptr
 #include <limits>             //  For std::numeric_limits
 #include <type_traits>        //  Detect conditions needed for noexcept.
 #include <utility>            //  For std::declval
@@ -42,6 +29,19 @@
 
 #if (__cplusplus >= 201703L) && !defined(THREAD_POOL_FALSE_SHARING_ALIGNMENT)
 #include <new>
+#endif
+
+#if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
+#include <thread>             //  For threads. Duh.
+#include <mutex>              //  For locking of central queue.
+#include <condition_variable> //  Let threads sleep instead of spin when idle.
+#else
+//    This toolchain-specific workaround allows ThreadPool to be used with
+//  MinGW-w64 even without linking the winpthreads library. If you lack these
+//  headers, you can find them at https://github.com/nmcclatchey/mingw-std-threads .
+#include "mingw.thread.h"
+#include "mingw.mutex.h"
+#include "mingw.condition_variable.h"
 #endif
 
 namespace {
@@ -114,6 +114,14 @@ constexpr std::size_t get_align (void)
 {
   return max(alignof(T), min(lsb(sizeof(T)), kFalseSharingAlignment));
 }
+
+struct RawDeleter
+{
+  void operator() (void * ptr) const
+  {
+    std::free(ptr);
+  }
+};
 
 /// \brief  Provides O(1) access to the Worker that is handling the current
 ///   function (if any). Used to provide a fast path for scheduling within the
@@ -1230,51 +1238,36 @@ ThreadPool::ThreadPool (unsigned threads)
 //    Total alignment is off by at most the greater of the alignments.
   std::size_t space = sizeof(ThreadPoolImpl) + threads * sizeof(Worker) +      \
                  max(alignof(ThreadPoolImpl), alignof(Worker)) + sizeof(void**);
-  void * memory = std::malloc(space);
-  if (memory == nullptr)
-    goto fail;
-  {
-    using std::align;
-    void * ptr = memory;
 
+  std::unique_ptr<void, RawDeleter> memory { std::malloc(space) };
+  if (memory == nullptr)
+    throw std::bad_alloc();
+  void * ptr = memory.get();
+
+  using std::align;
 //  Allocate space for a block of worker threads
-    if (!align(alignof(Worker), threads * sizeof(Worker), ptr, space))
-      goto fail;
-    Worker * workers = static_cast<Worker*>(ptr);
-    ptr = workers + threads;
+  if (!align(alignof(Worker), threads * sizeof(Worker), ptr, space))
+    throw std::bad_alloc();
+  Worker * workers = static_cast<Worker*>(ptr);
+  ptr = workers + threads;
 
 //  Allocate space for the controller.
-    if (!align(alignof(ThreadPoolImpl), sizeof(ThreadPoolImpl), ptr, space))
-      goto fail;
-    ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(ptr);
-    ptr = impl + 1;
+  if (!align(alignof(ThreadPoolImpl), sizeof(ThreadPoolImpl), ptr, space))
+    throw std::bad_alloc();
+  ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(ptr);
+  ptr = impl + 1;
 
-    try {
-      new(impl) ThreadPoolImpl(workers, threads);
-    } catch (...) {
-      std::free(memory);
-      throw;
-    }
+  new(impl) ThreadPoolImpl(workers, threads);
 
-    impl_ = impl;
-
-    *reinterpret_cast<void**>(ptr) = memory;
-  }
-  return;
-fail:
-  std::free(memory);
-  throw std::bad_alloc();
+  impl_ = impl;
+  *reinterpret_cast<void**>(ptr) = memory.release();
 }
 
 ThreadPool::~ThreadPool (void)
 {
   ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(impl_);
-  void * memory = *reinterpret_cast<void**>(impl + 1);
-
-  static_assert(noexcept(std::declval<ThreadPoolImpl>().~ThreadPoolImpl()),    \
-"ThreadPool's destructor assumes no exceptions from that of ThreadPoolImpl.");
+  std::unique_ptr<void,RawDeleter> memory {*reinterpret_cast<void**>(impl + 1)};
   impl->~ThreadPoolImpl();
-  std::free(memory);
 }
 
 unsigned ThreadPool::get_concurrency(void) const
