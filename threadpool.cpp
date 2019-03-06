@@ -14,6 +14,8 @@
 
 #include <atomic>             //  For atomic indexes, etc.
 #include <queue>              //  For central task queue
+#include <algorithm>          //  Heap maintenance functions, for time queue.
+#include <vector>             //  Storage for time queue.
 #include <cstdint>            //  Fixed-width integer types.
 
 #include <cstdlib>            //  For std::malloc and std::free
@@ -192,16 +194,15 @@ struct ThreadPoolImpl
     if (time_queue_.empty())
       return;
     auto time_now = clock::now();
-    while (time_now >= time_queue_.top().first)
+    while (time_now >= time_queue_.front().first)
     {
-      //try {
-        queue_.emplace(std::move(time_queue_.top().second));
-        time_queue_.pop();
-      /*} catch (...) {
-//  Task was invalidated. Needs to be removed to maintain consistent state.
-        time_queue_.pop();
-        throw;  //  Exits thread, calls std::terminate
-      }*/
+//  Strong exception-safety guarantee, even with move semantics.
+      queue_.emplace(std::move(time_queue_.front().second));
+//  Non-throwing.
+      TaskOrder comp;
+      std::pop_heap(time_queue_.begin(), time_queue_.end(), comp);
+      time_queue_.pop_back();
+
       if (time_queue_.empty())
         break;
     }
@@ -224,7 +225,10 @@ struct ThreadPoolImpl
   template<typename Task>
   inline void push_at (clock::time_point const & tp, Task && task)
   {
-    time_queue_.push(timed_task{tp, std::forward<Task>(task)});
+    //time_queue_.push(timed_task{tp, std::forward<Task>(task)});
+    time_queue_.push_back(timed_task{tp, std::forward<Task>(task)});
+    TaskOrder comp;
+    std::push_heap(time_queue_.begin(), time_queue_.end(), comp);
   }
 
 //  Note: wait and wait_until don't throw in C++14 and later.
@@ -234,7 +238,7 @@ struct ThreadPoolImpl
     if (time_queue_.empty())
       cv_.wait(lk);
     else
-      cv_.wait_until(lk, time_queue_.top().first);
+      cv_.wait_until(lk, time_queue_.front().first);
   }
 
   inline Worker * data (void) noexcept
@@ -253,7 +257,7 @@ struct ThreadPoolImpl
   mutable std::mutex mutex_ {};
 
   std::queue<task_type> queue_ {};
-  std::priority_queue<timed_task, std::vector<timed_task>, TaskOrder> time_queue_ {};
+  std::vector<timed_task> time_queue_ {};
 
   Worker * const workers_;
 
