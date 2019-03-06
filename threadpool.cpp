@@ -370,7 +370,6 @@ struct alignas(kFalseSharingAlignment) Worker
   bool pop (task_type & task)                               noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_assignable<task_type>::value);
   unsigned push_front(ThreadPoolImpl &, unsigned number);
   bool execute (void);
-  inline void post_execute (void) noexcept;
   void refresh_tasks (ThreadPoolImpl &, unsigned number);
 
 /// \brief  Activates a task slot within the queue, and fills it appropriately.
@@ -660,35 +659,39 @@ bool Worker::execute (void)
   if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
     return false;
 
-  front_invalid_ = true;
-  //try {
+//    Will ensure that the queue is restored to validity, even in the event of
+//  an exception.
+  struct Reservation
+  {
+    Reservation (Worker & worker) noexcept
+      : worker_(worker)
+    {
+      worker_.front_invalid_ = true;
+    }
+    ~Reservation (void)
+    {
+      if (worker_.front_invalid_)
+      {
+        worker_.front_invalid_ = false;
+        auto new_front = worker_.front_.load(std::memory_order_relaxed);
+        worker_.front_.store((new_front+1)%kModulus, std::memory_order_relaxed);
+//  I need to release back_ so that the write to front_ is visible to thieves.
+        worker_.back_.fetch_or(0, std::memory_order_release);
+      }
+    }
+    Reservation (Reservation const &) = delete;
+    Reservation & operator= (Reservation const &) = delete;
+   private:
+    Worker & worker_;
+  } reservation {*this};
 //  Potentially-throwing.
-    task_type task = remove_task(front);
+  task_type task = remove_task(front);
 //  Potentially-throwing.
-    task();
-  /*} catch (...) {
-//    Restore queue to validity, though ensure that the task that was pulled is
-//  no longer in the queue.
-    if (front_invalid_)
-      post_execute();
-    throw;  //  Exits thread, calls std::terminate
-  }*/
+  task();
 /// \todo Find a good way to unify this with the other validation.
 //    If the slot was not already overwritten (eg. by the task pushing to the
 //  task-queue), need to adjust the queue size.
-  if (front_invalid_)
-    post_execute();
   return true;
-}
-
-void Worker::post_execute (void) noexcept
-{
-  assert(front_invalid_ && "Must only be called by execute as a cleanup.");
-  front_invalid_ = false;
-  auto new_front = front_.load(std::memory_order_relaxed);
-  front_.store((new_front + 1) % kModulus, std::memory_order_relaxed);
-//  I need to release back_ so that the write to front_ is visible to thieves.
-  back_.fetch_or(0, std::memory_order_release);
 }
 
 //  Pulls some tasks into the local queue from the central queue
