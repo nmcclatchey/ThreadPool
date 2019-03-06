@@ -137,8 +137,8 @@ struct ThreadPool
   ~ThreadPool (void);
 
 //  Thread pools cannot be copied or moved.
-  ThreadPool (const ThreadPool &) = delete;
-  ThreadPool & operator= (const ThreadPool &) = delete;
+  ThreadPool (ThreadPool const &) = delete;
+  ThreadPool & operator= (ThreadPool const &) = delete;
 
 /// \brief  Schedules a task to be run asynchronously.
 /// \param[in]  task  The task to be performed.
@@ -149,7 +149,7 @@ struct ThreadPool
 /// call to `schedule()` that added it to the pool, using a *Release-Acquire*
 /// ordering.
 
-  void schedule (const task_type & task);
+  void schedule (task_type const & task);
 /// \overload
   void schedule (task_type && task);
 
@@ -165,7 +165,7 @@ struct ThreadPool
 /// call to `schedule_after()` that added it to the pool, using a
 /// *Release-Acquire* ordering.
   template<class Rep, class Period, class Task>
-  void schedule_after ( const std::chrono::duration<Rep, Period> & rel_time,
+  void schedule_after ( std::chrono::duration<Rep, Period> const & rel_time,
                         Task && task)
   {
     using namespace std;
@@ -183,7 +183,7 @@ struct ThreadPool
 /// call to `schedule_after()` that added it to the pool, using a
 /// *Release-Acquire* ordering.
   template<class Clock, class Duration, class Task>
-  void schedule_after ( const std::chrono::time_point<Clock, Duration> & time,
+  void schedule_after ( std::chrono::time_point<Clock, Duration> const & time,
                         Task && task)
   {
     using namespace std;
@@ -213,7 +213,7 @@ struct ThreadPool
 /// \warning  Because a subtask is considered as part of the task that spawned
 ///   it, no guarantees of non-starvation are made should the collective
 ///   subtasks not terminate.
-  void schedule_subtask (const task_type & task);
+  void schedule_subtask (task_type const & task);
 /// \overload
   void schedule_subtask (task_type && task);
 
@@ -280,8 +280,8 @@ struct ThreadPool
  private:
   void * impl_;
   typedef std::chrono::steady_clock::duration duration;
-  void sched_impl ( const duration &, const task_type &);
-  void sched_impl ( const duration &, task_type && task);
+  void sched_impl ( duration const &, task_type const &);
+  void sched_impl ( duration const &, task_type && task);
 };
 
 #endif // THREAD_POOL_HPP_
