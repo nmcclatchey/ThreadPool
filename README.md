@@ -8,11 +8,11 @@ This library consists of a single header and source file. One may compile the so
 
 ### Prerequisites
 
-You will require a C++11 compiler. If you are using MinGW-w64, you may require [MinGW STD Threads](https://github.com/nmcclatchey/mingw-std-threads "MinGW STD Threads") to supply `std::thread` and similar.
+You will require a C++11 compiler. If you are using MinGW-w64, you may require [MinGW STD Threads](https://github.com/meganz/mingw-std-threads "MinGW STD Threads") to supply `std::thread` and similar.
 
 ### Installing
 
-Either compile `thread_pool.cpp` as part of your project, or [compile it as a static library](https://en.wikipedia.org/wiki/Static_library "Wikipedia: Static library").
+Either compile `threadpool.cpp` as part of your project, or [compile it as a static library](https://en.wikipedia.org/wiki/Static_library "Wikipedia: Static library").
 
 ### Using the library
 
@@ -25,7 +25,7 @@ Full documentation for this library may be generated using  Doxygen.
 
 A simple example of how to the library follows:
 ```
-#include "thread_pool.hpp"
+#include "threadpool.hpp"
 
 //  Create a new thread pool, letting the implementation determine the number of worker threads to use.
 ThreadPool pool;

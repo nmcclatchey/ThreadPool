@@ -1,11 +1,11 @@
 /// \file   threadpool.cpp
-/// \brief  Implements \ref `threadpool.hpp`.
+/// \brief  Implements `threadpool.hpp`.
 /// \author Nathaniel J. McClatchey, PhD
-/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
+/// \copyright Copyright (c) 2017-2019 Nathaniel J. McClatchey, PhD.          \n
 ///   Licensed under the MIT license.                                         \n
 ///   You should have received a copy of the license with this software.
 /// \note   To compile for MinGW-w64 without linking against the *winpthreads*
-/// library, use the [*MinGW Windows STD Threads* library](https://github.com/nmcclatchey/mingw-std-threads).
+/// library, use the [*MinGW Windows STD Threads* library](https://github.com/meganz/mingw-std-threads "MinGW STD Threads").
 #include "threadpool.hpp"
 
 #if !defined(__cplusplus) || (__cplusplus < 201103L)
@@ -67,7 +67,7 @@ struct ThreadPoolImpl;
 ///   more memory, but less processing power. The reverse holds for smaller
 ///   values.
 /// \note Must be positive.
-constexpr std::size_t kLog2Modulus = 14u;
+constexpr std::uint_fast8_t kLog2Modulus = 12u;
 
 static_assert(kLog2Modulus > 0, "Worker thread capacity must be positive.");
 
@@ -120,6 +120,8 @@ constexpr std::size_t get_align (void)
   return max(alignof(T), min(lsb(sizeof(T)), kFalseSharingAlignment));
 }
 
+/// \brief  Destructor that allows `std::unique_ptr` to be used with memory
+///   acquired using `malloc`.
 struct RawDeleter
 {
   void operator() (void * ptr) const

@@ -4,12 +4,14 @@
 ///
 ///   This header is part of a multi-tasking library that provides low-overhead
 /// concurrent scheduling. This is provided through a thread pool, and uses the
-/// [work-stealing method](https://en.wikipedia.org/wiki/Work_stealing) for load
-/// balancing.                                                           \n
-///   This averts the overhead of creating a new thread for each task, and thus
+/// [work-stealing method](https://en.wikipedia.org/wiki/Work_stealing "Wikipedia: Work stealing")
+/// for load balancing.                                                       \n
+///   In addition, the library provides a fast scheduling path for tasks spawned
+/// by another task within the same pool.                                     \n
+///   These avert the majority of scheduling overhead for each new task, which
 /// makes fine-grained parallelism feasible.
 /// \code
-/// #include "thread_pool.hpp"
+/// #include "threadpool.hpp"
 ///
 /// //    Create a new thread pool, letting the implementation determine the
 /// //  number of worker threads to use.
@@ -33,8 +35,8 @@
 /// //  synchronization is required.
 ///   pool.schedule_subtask([](void) { });
 ///
-/// //  Put a task into the pool, to be executed 2 seconds after it is scheduled.
 ///  using namespace std::chrono;
+/// //  Put a task into the pool, to be executed 2 seconds after it is scheduled.
 ///  pool.schedule_after(seconds(2),
 ///  [](void) {
 ///    do_something();
@@ -58,17 +60,19 @@
 ///   deadlock, it is recommended that tasks be constructed such that at least
 ///   one active task makes progress.
 /// \note Users may define the macro `THREAD_POOL_FALSE_SHARING_ALIGNMENT` to
-///   specify L1 cache line size when compiling \ref `thread_pool.cpp`. Default
-///   is 64 bytes, as this is typical of x86 and x64 systems.
+///   specify L1 cache line size when compiling `threadpool.cpp`. If it is not
+///   specified, the library will attempt to use C++17's
+///   `hardware_destructive_interference_size`. If that feature is not supported
+///   by the compiler, an implementation-defined default value will be selected.
 /// \note Users may specify the capacity of each worker's fixed queue by
-///   changing the definition of `kLog2Modulus` in \ref `thread_pool.cpp`.
+///   changing the definition of `kLog2Modulus` in `threadpool.cpp`.
 /// \todo Allow tasks to return values, possibly using `std::packaged_task`.
 /// \todo Investigate delegates as a replacement for `std::function`:
-///   ["The Impossibly Fast C++ Delegates (Fixed)"](https://www.codeproject.com/Articles/1170503/The-Impossibly-Fast-Cplusplus-Delegates-Fixed)
+///   ["The Impossibly Fast C++ Delegates (Fixed)"](https://www.codeproject.com/Articles/1170503/The-Impossibly-Fast-Cplusplus-Delegates-Fixed "The Impossibly Fast C++ Delegates")
 /// \author Nathaniel J. McClatchey, PhD
-/// \version  2.0.0
-/// \copyright Copyright (c) 2017 Nathaniel J. McClatchey, PhD.               \n
-///   [Licensed under the MIT license.](https://github.com/nmcclatchey/ThreadPool/blob/master/LICENSE)  \n
+/// \version  2.0
+/// \copyright Copyright (c) 2017-2019 Nathaniel J. McClatchey, PhD.          \n
+///   [Licensed under the MIT license.](https://github.com/nmcclatchey/ThreadPool/blob/master/LICENSE "MIT License")  \n
 ///   You should have received a copy of the license with this software.
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -89,7 +93,6 @@
 #include <cstddef>
 //  For timed waiting.
 #include <chrono>
-//#include <future>
 
 /// \brief A high-performance asynchronous task scheduler.
 /// \warning  If `get_concurrency()` active tasks (or more) simultaneously
@@ -104,17 +107,18 @@
 ///   path is taken, requiring synchronization of the `ThreadPool`'s central
 ///   queue.
 /// \note If the worker's local queue is full, the slow path is taken. If one
-///   compiles \ref `thread_pool.cpp` without the macro `NDEBUG` defined, a
-///   warning will be printed when an over-full queue is first detected.
-//    Implementer's note: The [pointer to implementation idiom](http://en.cppreference.com/w/cpp/language/pimpl)
+///   compiles `threadpool.cpp` without the macro `NDEBUG` defined, a warning
+///   will be printed when an over-full queue is first detected.
+//    Implementer's note: The [pointer to implementation idiom](http://en.cppreference.com/w/cpp/language/pimpl "C++ Reference: pImpl idiom")
 //  provides no significant disadvantage. It will impose a pointer lookup
 //  penalty, but only on the slow path. Moreover, dynamic allocation is required
 //  regardless, and all initial allocation is combined into a single allocation.
 struct ThreadPool
 {
-/// \brief  A [Callable](https://en.cppreference.com/w/cpp/named_req/Callable)
+/// \brief  A [Callable](https://en.cppreference.com/w/cpp/named_req/Callable "C++ Reference: Named requirements: Callable")
 ///   type, taking no arguments and returning void. Used to store tasks for
 ///   later execution.
+/// \note   Will be called at most once, then destroyed.
   using task_type = std::function<void()>;
 
 /// \brief  Initializes a thread pool and starts a collection of worker threads.
@@ -147,13 +151,13 @@ struct ThreadPool
 /// \brief  Schedules a task to be performed asynchronously.
 /// \param[in]  task  The task to be performed.
 ///
-///   Schedules a task to be performed asynchronously. The task will be
-/// performed by one of the pool's worker threads.
+///   Schedules a task to be performed asynchronously. The task will be called
+/// at most once.
 /// \par  Memory order
 ///   Execution of a task *synchronizes-with* (as in
-/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order))
-/// the call to `schedule()` that added it to the pool, using a
-/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering)
+/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order "C++ Reference: Memory order")
+/// ) the call to `schedule()` that added it to the pool, using a
+/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering "C++ Reference: Release-Acquire ordering")
 /// ordering.
   void schedule (task_type const & task);
 /// \overload
@@ -165,12 +169,12 @@ struct ThreadPool
 /// \param[in]  task  The task to be performed.
 ///
 ///   Schedules a task to be performed asynchronously, but only after waiting
-/// for a duration of *rel_time*.
+/// for a duration of *rel_time*. The task will be called at most once.
 /// \par  Memory order
 ///   Execution of a task *synchronizes-with* (as in
-/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order))
-/// the call to `schedule_after()` that added it to the pool, using a
-/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering)
+/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order "C++ Reference: Memory order")
+/// ) the call to `schedule_after()` that added it to the pool, using a
+/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering "C++ Reference: Release-Acquire ordering")
 /// ordering.
   template<class Rep, class Period, class Task>
   void schedule_after ( std::chrono::duration<Rep, Period> const & rel_time,
@@ -186,11 +190,12 @@ struct ThreadPool
 /// \param[in]  task  The task to be performed.
 ///
 ///   Schedules a task to be performed asynchronously at a specified time point.
+/// The task will be called at most once.
 /// \par  Memory order
 ///   Execution of a task *synchronizes-with* (as in
-/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order))
-/// the call to `schedule_after()` that added it to the pool, using a
-/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering)
+/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order "C++ Reference: Memory order")
+/// ) the call to `schedule_after()` that added it to the pool, using a
+/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering "C++ Reference: Release-Acquire ordering")
 /// ordering.
   template<class Clock, class Duration, class Task>
   void schedule_after ( std::chrono::time_point<Clock, Duration> const & time,
@@ -211,16 +216,18 @@ struct ThreadPool
 ///   chance of being performed soon after scheduling, but relaxes
 ///   non-starvation guarantees. In particular, if the collective subtasks fail
 ///   to terminate, then the original task is considered not to have terminated,
-///   and later tasks may fail to run.
+///   and later tasks may fail to run.                                        \n
 ///     The `schedule_subtask()` method may be used to encourage (not force)
 ///   depth-first execution -- rather than breadth-first execution -- if tasks
 ///   exhibit significant branching. This can reduce the odds of a local queue
 ///   overflow (the slow path) and reduce the memory needed for scheduled tasks.
+///                                                                           \n
+///     The task will be called at most once.
 /// \par  Memory order
 ///   Execution of a task *synchronizes-with* (as in
-/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order))
-/// the call to `schedule_subtask()` that added it to the pool, using a
-/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering)
+/// [`std::memory_order`](https://en.cppreference.com/w/cpp/atomic/memory_order "C++ Reference: Memory order")
+/// ) the call to `schedule_subtask()` that added it to the pool, using a
+/// [*Release-Acquire*](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering "C++ Reference: Release-Acquire ordering")
 /// ordering.
 /// \warning  Because a subtask is considered as part of the task that spawned
 ///   it, no guarantees of non-starvation are made should the collective
@@ -233,15 +240,16 @@ struct ThreadPool
 /// \return Number of threads in the pool.
 ///
 ///   Returns the number of threads in the `ThreadPool`. That is, this function
-/// returns the number of tasks that can be truly concurrently executed.
+/// returns the number of tasks that can be truly executed concurrently or with
+/// preemption.
 /// \note If more than `get_concurrency()` tasks block simultaneously, the
 ///   entire `ThreadPool` is blocked, and no further progress will be made.
   unsigned get_concurrency (void) const noexcept;
 
 /// \brief  Maximum number of tasks that can be efficiently scheduled by a
 ///   worker thread.
-/// \return Returns the number of tasks that a worker thread can have scheduled
-///   without contention.
+/// \return Returns the number of tasks that a worker thread can retain in local
+///   storage.
 ///
 ///   To reduce contention, each worker thread keeps its own queue of tasks. The
 /// queues are pre-allocated, and of constant size. The `get_worker_capacity()`
@@ -253,14 +261,14 @@ struct ThreadPool
 /// task scheduling is more likely to take the slow path, but less memory is
 /// required.                                                                 \n
 ///   To select the size of the worker queues, edit the variable `kLog2Modulus`
-/// in `thread_pool.cpp`.
+/// in `threadpool.cpp`.
   static std::size_t get_worker_capacity (void) noexcept;
 
-/// \brief  Returns whether the pool is currently idle.
+/// \brief  Determines whether the pool is currently idle.
 /// \return `true` if the pool is idle, or `false` if not.
 ///
-///   Returns whether the pool is idle. That is, returns true if all threads in
-/// the pool are simultaneously idling, or `false` if at least one thread is
+///   Returns whether the pool is idle. That is, returns `true` if all threads
+/// in the pool are simultaneously idling, or `false` if at least one thread is
 /// active. If the pool is halted, the returned value is undefined. Calling this
 /// from within one of the `ThreadPool`'s tasks necessarily returns `false`.
   bool is_idle (void) const;
@@ -279,9 +287,11 @@ struct ThreadPool
 ///   `halt()`, or starts threads that had previously failed to initialize.
 ///
 ///   Attempts to start, restart, or resume all worker threads.
-/// - If all worker threads are already running, this function has no effect.
+/// - If all allocated worker threads are already running, this function has no
+/// effect.
 /// - If execution is currently halted, or the number of active workers is less
-/// than capacity, re-starts all possible worker threads.
+/// than that returned by `get_concurrency()`, attempts to re-start all inactive
+/// worker threads.
 /// .
 ///   May start fewer worker threads than the total capacity of the pool.     \n
 ///   May block the caller until all started worker threads have resumed their
