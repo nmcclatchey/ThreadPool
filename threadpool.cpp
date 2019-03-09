@@ -12,27 +12,30 @@
 #error The implementation of ThreadPool requires C++11 or higher.
 #endif
 
-#include <atomic>             //  For atomic indexes, etc.
-#include <queue>              //  For central task queue
-#include <algorithm>          //  Heap maintenance functions, for time queue.
-#include <vector>             //  Storage for time queue.
+//  Debugging:
+#include <cassert>            //  Fail deadly on internal library error.
+#ifndef NDEBUG
+#include <cstdio>             //  Warn on task queue overflow.
+#endif
+//  Memory management (for allocate-once approach):
+#include <cstdlib>            //  For std::malloc and std::free.
+#include <memory>             //  For std::align and std::unique_ptr.
+#if (__cplusplus >= 201703L) && !defined(THREAD_POOL_FALSE_SHARING_ALIGNMENT)
+#include <new>                //  Used to detect cache size.
+#endif
+//  Integers:
 #include <cstdint>            //  Fixed-width integer types.
-
-#include <cstdlib>            //  For std::malloc and std::free
-#include <memory>             //  For std::align and std::unique_ptr
-#include <limits>             //  For std::numeric_limits
+#include <atomic>             //  Relaxed memory orderings, for efficiency.
+#include <limits>             //  Type sizes and maximum values.
+//  Central queue management:
+#include <algorithm>          //  Delayed-task sorting.
+#include <vector>             //  Delayed-task storage.
+#include <queue>              //  For central task queue.
+//  Miscellaneous type information:
 #include <type_traits>        //  Detect conditions needed for noexcept.
 #include <utility>            //  For std::declval
 
-#include <cassert>            //  For debugging: Fail deadly.
-#ifndef NDEBUG
-#include <cstdio>             //  For debugging: Warn on task queue overflow.
-#endif
-
-#if (__cplusplus >= 201703L) && !defined(THREAD_POOL_FALSE_SHARING_ALIGNMENT)
-#include <new>
-#endif
-
+//  Threading facilities:
 #if (!defined(__MINGW32__) || defined(_GLIBCXX_HAS_GTHREADS))
 #include <thread>             //  For threads. Duh.
 #include <mutex>              //  For locking of central queue.
@@ -143,12 +146,12 @@ struct ThreadPoolImpl
 //  Returns number of allocated Workers (may differ from active workers later)
   inline index_type get_capacity (void) const noexcept
   {
-    return threads_;
+    return num_workers_;
   }
 
   inline index_type get_concurrency (void) const noexcept
   {
-    return threads_;
+    return num_threads_.load(std::memory_order_relaxed);
   }
 
   void halt (void);
@@ -194,18 +197,22 @@ struct ThreadPoolImpl
     if (time_queue_.empty())
       return;
     auto time_now = clock::now();
-    while (time_now >= time_queue_.front().first)
-    {
+    try {
+      while (time_now >= time_queue_.front().first)
+      {
 //  Strong exception-safety guarantee, even with move semantics.
-      queue_.emplace(std::move(time_queue_.front().second));
-//  Non-throwing.
-      TaskOrder comp;
-      std::pop_heap(time_queue_.begin(), time_queue_.end(), comp);
-      time_queue_.pop_back();
+        push(std::move(time_queue_.front().second));
+//  The pop_back method for a vector should be non-throwing.
+        TaskOrder comp;
+        std::pop_heap(time_queue_.begin(), time_queue_.end(), comp);
+        time_queue_.pop_back();
 
-      if (time_queue_.empty())
-        break;
-    }
+        if (time_queue_.empty())
+          break;
+      }
+//    If an exception was thrown, it was thrown in `push`. Because of the strong
+//  exception-safety guarantee, nothing actually happens.
+    } catch (std::bad_alloc &) { }
   }
 //  Note: Does no synchronization of its own.
   task_type extract_task (void)
@@ -216,12 +223,17 @@ struct ThreadPoolImpl
     return result;
   }
 
+/// \par  Exception safety
+///   Provides the strong (rollback) guarantee, even with move semantics.
   template<typename Task>
   inline void push (Task && task)
   {
     queue_.push(std::forward<Task>(task));
   }
 
+/// \par  Exception safety
+///   Provides the strong (rollback) guarantee unless the task can only be moved
+/// and has a throwing move constructor.
   template<typename Task>
   inline void push_at (clock::time_point const & tp, Task && task)
   {
@@ -261,8 +273,9 @@ struct ThreadPoolImpl
 
   Worker * const workers_;
 
-  index_type threads_,
+  index_type num_workers_ {0},
               living_ {0}, idle_ {0}, paused_ {0};
+  std::atomic<index_type> num_threads_ {0};
 
   std::atomic<std::uint_fast8_t> stop_ {0x00};
 
@@ -291,17 +304,28 @@ struct alignas(kFalseSharingAlignment) Worker
 
   void operator() (void);
 
+  bool is_alive (void) const noexcept
+  {
+    return thread_.joinable();
+  }
+
   void restart_thread (void)
   {
     assert(!pool_.should_stop() && "Start or stop new threads. Not both.");
     if (!thread_.joinable())  //  noexcept
+    {
       thread_ = std::thread(std::reference_wrapper<Worker>(*this));
+      pool_.num_threads_.fetch_add(1, std::memory_order_relaxed);
+    }
   }
   void stop_thread (void)
   {
     assert(pool_.should_stop() && "Spurious thread-stopping detected.");
     if (thread_.joinable()) //  noexcept
+    {
       thread_.join();
+      pool_.num_threads_.fetch_sub(1, std::memory_order_relaxed);
+    }
   }
 
   inline bool belongs_to (ThreadPoolImpl const * ptr) const noexcept
@@ -326,6 +350,8 @@ struct alignas(kFalseSharingAlignment) Worker
   bool push_front (Task && tasks);
 
   index_type count_tasks (void) const noexcept;
+
+  void canibalize (ThreadPoolImpl &);
 
  private:
   Worker (Worker const &) = delete;
@@ -620,9 +646,10 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
 //    Removes a task from the front of the queue, if possible. Returns true or
 //  false for success or failure, respectively.
 bool Worker::pop (task_type & task)
-  noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_assignable<task_type>::value)
+  noexcept(std::is_nothrow_destructible<task_type>::value &&
+           std::is_nothrow_move_assignable<task_type>::value)
 {
-  assert(std::this_thread::get_id() == thread_.get_id() && "Worker::pop may only be called from the Worker's own thread.");
+  //assert(std::this_thread::get_id() == thread_.get_id() && "Worker::pop may only be called from the Worker's own thread.");
 
   auto front = front_.load(std::memory_order_relaxed);
   auto back = back_.load(std::memory_order_acquire);
@@ -694,7 +721,8 @@ bool Worker::execute (void)
   return true;
 }
 
-//  Pulls some tasks into the local queue from the central queue
+//    Pulls some tasks into the local queue from the central queue, and returns
+//  others.
 void Worker::refresh_tasks (ThreadPoolImpl & tasks, unsigned number)
 {
   unsigned num_pushed = push_front(tasks, number);
@@ -711,11 +739,35 @@ void Worker::refresh_tasks (ThreadPoolImpl & tasks, unsigned number)
   }
 }
 
+//  Feeds all existing tasks to the ThreadPool. Used as a last resort.
+void Worker::canibalize (ThreadPoolImpl & tasks)
+{
+  do {
+    task_type task;
+    if (pop(task))
+      tasks.push(std::move(task));
+    else
+    {
+      auto front = front_.load(std::memory_order_relaxed);
+      auto back = back_.load(std::memory_order_relaxed);
+//    If the queue is fully-depleted, our job is done. Otherwise, we need to
+//  keep trying.
+      if ((get_write(back) == get_valid(back)) && (get_valid(back) == front))
+        break;
+      else
+        std::this_thread::yield();
+    }
+  } while (true);
+}
+
 //    Pushes a task onto the back of the queue, if possible. If the back of the
 //  queue is in contention, (eg. because of work stealing), pushes onto the
 //  front of the queue instead.
 //    Note: Only evaluates the task reference if there is room to insert the
 //  task.
+/// \par  Exception safety
+///   *Strong*: If an exception is thrown, the function has no effect.
+///   Applies only if `place_task()` also provides the strong guarantee.
 template<typename Task>
 bool Worker::push (Task && task)
 {
@@ -735,14 +787,15 @@ bool Worker::push (Task && task)
                                     std::memory_order_acquire,
                                     std::memory_order_relaxed))
   {
-    //try {
-      place_task(write, std::forward<Task>(task));
+    try {
+      place_task(write, std::forward<Task>(task));  //  May throw.
       back_.store(make_back(new_back), std::memory_order_release);
-    /*} catch (...) {
+    } catch (...) {
 //  Restore to original state.
+/// \todo Switch to RAII-based approach.
       back_.store(back, std::memory_order_release);
       throw;
-    }*/
+    }
   }
   else
   {
@@ -978,11 +1031,11 @@ kill:
 ////////////////////////////////////////////////////////////////////////////////
 
 ThreadPoolImpl::ThreadPoolImpl (Worker * workers, index_type num_workers)
-  : workers_(workers),
-    threads_(num_workers)
+  : workers_(workers), num_workers_(num_workers)
 {
   assert(num_workers > 0);
   std::unique_lock<decltype(mutex_)> guard (mutex_);
+
 //  Construct the workers, after some safety-checks.
   static_assert(std::is_nothrow_constructible<Worker, ThreadPoolImpl &>::value,\
     "This loop is only exception-safe if Worker construction is non-throwing");
@@ -990,11 +1043,22 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, index_type num_workers)
     new(workers_ + i) Worker(*this);
 //    Start the threads only after all initialization is complete. The Worker's
 //  loop will need no further synchronization for safe use.
-/// \todo Identify proper response if this throws an exception. Possible options
-///   include throwing an exception and starting the pool with fewer than the
-///   desired number of threads.
+//    Note that a worker without an initialized thread will simply do nothing,
+//  because the threads are responsible for populating themselves with tasks.
+  std::exception_ptr eptr;
   for (index_type i = 0; i < get_capacity(); ++i)
-    workers_[i].restart_thread();
+  {
+    try {
+      workers_[i].restart_thread();
+    } catch (std::system_error &) {
+      eptr = std::current_exception();
+    }
+  }
+//    If no threads were able to start, give a meaningful error regarding why.
+//  However, if at least one thread was able to start, the ThreadPool will
+//  function properly.
+  if (get_concurrency() == 0)
+    std::rethrow_exception(eptr);
 //  Wait for the pool to be fully populated to ensure no weird behaviors.
   cv_.wait(guard, [this](void)->bool {
     return (living_ == get_concurrency()) || should_stop();
@@ -1090,8 +1154,21 @@ void ThreadPoolImpl::resume (void)
   stop_.store(0x00, std::memory_order_relaxed);
   cv_.notify_all(); //  noexcept
 
+  std::exception_ptr eptr;
   for (unsigned i = 0; i < get_capacity(); ++i)
-    workers_[i].restart_thread();
+  {
+    try {
+      workers_[i].restart_thread();
+    } catch (std::system_error &) {
+//    Whenever a thread fails to start, remove all the tasks it would otherwise
+//  need to consume. This will prevent those tasks from becoming unreachable.
+      if (!workers_[i].is_alive())
+        workers_[i].canibalize(*this);
+      eptr = std::current_exception();
+    }
+  }
+  if (get_concurrency() == 0)
+    std::rethrow_exception(eptr);
 
   cv_.wait(guard, [this](void)->bool {
     return (living_ >= get_concurrency()) || should_stop();
@@ -1112,14 +1189,18 @@ bool ThreadPoolImpl::is_idle (void) const
   return (idle_ + paused_) == living_;
 }
 
+/// \par Exception safety
+///   Provides the strong (rollback) guarantee.
 template<typename Task>
 void ThreadPoolImpl::schedule_overflow (Task && task)
 {
   std::lock_guard<decltype(mutex_)> guard (mutex_);
-  push(std::forward<Task>(task));
+  push(std::forward<Task>(task)); // < Strong exception-safety guarantee.
   notify_if_idle();
 }
 
+/// \par Exception safety
+///   Provides the strong (rollback) guarantee.
 template<typename Task>
 void ThreadPoolImpl::schedule_after (clock::duration const & dur, Task && task)
 {
@@ -1194,7 +1275,7 @@ void impl_schedule_after (std::chrono::steady_clock::duration const & dur,
                           Task && task, ThreadPoolImpl * impl)
 {
   if (dur <= std::chrono::steady_clock::duration(0))
-    impl_schedule(task, impl);
+    impl_schedule(std::forward<Task>(task), impl);
   else
   {
 #ifndef NDEBUG
@@ -1268,7 +1349,7 @@ ThreadPool::~ThreadPool (void)
   impl->~ThreadPoolImpl();
 }
 
-unsigned ThreadPool::get_concurrency(void) const
+unsigned ThreadPool::get_concurrency(void) const noexcept
 {
   return static_cast<ThreadPoolImpl const*>(impl_)->get_concurrency();
 }
@@ -1285,7 +1366,7 @@ void ThreadPool::schedule (task_type const & task)
 }
 void ThreadPool::schedule (task_type && task)
 {
-  impl_schedule(task, static_cast<ThreadPoolImpl*>(impl_));
+  impl_schedule(std::move(task), static_cast<ThreadPoolImpl*>(impl_));
 }
 
 //  Schedules a task normally, at the back of the queue.
@@ -1295,7 +1376,7 @@ void ThreadPool::sched_impl(duration const & dur, task_type const & task)
 }
 void ThreadPool::sched_impl(duration const & dur, task_type && task)
 {
-  impl_schedule_after(dur, task, static_cast<ThreadPoolImpl*>(impl_));
+  impl_schedule_after(dur, std::move(task),static_cast<ThreadPoolImpl*>(impl_));
 }
 
 //  Schedule at the front of the queue, if in fast path.
@@ -1305,10 +1386,10 @@ void ThreadPool::schedule_subtask (task_type const & task)
 }
 void ThreadPool::schedule_subtask (task_type && task)
 {
-  impl_schedule_subtask(task, static_cast<ThreadPoolImpl*>(impl_));
+  impl_schedule_subtask(std::move(task), static_cast<ThreadPoolImpl*>(impl_));
 }
 
-std::size_t ThreadPool::get_worker_capacity (void)
+std::size_t ThreadPool::get_worker_capacity (void) noexcept
 {
   return kModulus - 1;
 }
