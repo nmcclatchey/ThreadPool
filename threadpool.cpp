@@ -509,21 +509,21 @@ void Worker::remove_all_and (Func const & func)
   back = get_valid(back);
 
   index_type front = front_.load(std::memory_order_acquire);
-  try {
-    while (front != back) {
-      back = (back - 1 + kModulus) % kModulus;
+//  Ensure a consistent state, in the event of an exception.
+  struct RAIIHelper
+  {
+    decltype(back_) & back_ref;
+    index_type value;
+    ~RAIIHelper (void)
+    {
+      back_ref.store(value, std::memory_order_release);
+    }
+  } raii_helper { back_, back };
+  while (front != raii_helper.value)
+  {
+    raii_helper.value = (raii_helper.value - 1 + kModulus) % kModulus;
 //  Possibly-throwing:
-      func(remove_task(back));
-    }
-    back_.store(make_back(front), std::memory_order_release);
-  } catch (...) {
-//  Attempt to clear out the queue.
-    while (front != back) {
-      back = (back - 1 + kModulus) % kModulus;
-      remove_task(back);
-    }
-    back_.store(make_back(front), std::memory_order_release);
-    throw;
+    func(remove_task(raii_helper.value));
   }
 }
 
