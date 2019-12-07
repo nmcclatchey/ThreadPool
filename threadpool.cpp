@@ -789,15 +789,17 @@ bool Worker::push (Task && task)
                                     std::memory_order_acquire,
                                     std::memory_order_relaxed))
   {
-    try {
-      place_task(write, std::forward<Task>(task));  //  May throw.
-      back_.store(make_back(new_back), std::memory_order_release);
-    } catch (...) {
-//  Restore to original state.
-/// \todo Switch to RAII-based approach.
-      back_.store(back, std::memory_order_release);
-      throw;
-    }
+    struct RAIIHelper
+    {
+      decltype(back_) & back_ref;
+      index_type value;
+      ~RAIIHelper (void)
+      {
+        back_ref.store(value, std::memory_order_release);
+      }
+    } raii_helper { back_, back };
+    place_task(write, std::forward<Task>(task));  //  May throw.
+    raii_helper.value = make_back(new_back);
   }
   else
   {
