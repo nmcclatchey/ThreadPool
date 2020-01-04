@@ -2,6 +2,23 @@
 
 Provides low-overhead concurrent scheduling in C++11 through [thread pools](https://en.wikipedia.org/wiki/Thread_pool "Wikipedia: Thread pool") and [work stealing](https://en.wikipedia.org/wiki/Work_stealing "Wikipedia: Work stealing"). The thread pool approach allows fine-grained parallelism by minimizing the overhead involved in scheduling a task. The work stealing approach allows efficient balancing of scheduled tasks across available threads.
 
+## Why use this library?
+
+- It fulfills common scheduling needs:
+    + Performs multiple tasks concurrently.
+    + Tasks can be scheduled for an arbitrary later time-point. This provides an efficient replacement for timed waits.
+    + A task can spawn subtasks, with a hint that the pool ought to complete them as soon as possible.
+- It fulfills some uncommon scheduling needs:
+    + The pool can be paused, and later resumed.
+- It is designed for efficiency and scalability:
+    + Load balancing ensures that as long as there is work to do, it is being done by as many threads as possible.
+    + Lock-free data structures use [weak atomic orderings](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering "C++ Reference: Release-Acquire ordering"); only when those cores that require new tasks are synchronized.
+    + No busy-waiting. Idle threads use [condition variables](https://en.cppreference.com/w/cpp/thread/condition_variable "C++ Reference: condition_variable) to wait without using the CPU.
+- It is explicitly documented:
+    + Full generated documentation via [Doxygen](http://www.doxygen.nl/).
+    + Memory synchronization between task scheduling and execution is explicitly stated in terms of [C++11's memory model](https://en.cppreference.com/w/cpp/atomic/memory_order "C++ Reference: Memory order").
+    + Provides usage recommendations for maximizing performance.
+
 ## Getting Started
 
 This library consists of a single header and source file. One may compile the source file either as part of one's own project, or as a static library.
