@@ -71,7 +71,9 @@ constexpr std::uint_fast8_t kLog2Modulus = 12u;
 
 static_assert(kLog2Modulus > 0, "Worker thread capacity must be positive.");
 
-constexpr std::size_t kModulus = 1ull << kLog2Modulus;
+constexpr std::uint_fast32_t kModulus = 1ull << kLog2Modulus;
+
+static_assert(kLog2Modulus < std::numeric_limits<decltype(kModulus)>::digits, "Worker thread capacity must not be excessive.");
 
 /// \brief  Least-significant bit of an integer. Useful for alignment of arrays,
 ///   because an alignment greater than the L.S.B. of the size of an element
@@ -199,22 +201,23 @@ struct ThreadPoolImpl
     if (time_queue_.empty())
       return;
     auto time_now = clock::now();
-    try {
-      while (time_now >= time_queue_.front().first)
-      {
-//  Strong exception-safety guarantee, even with move semantics.
-        push(std::move(time_queue_.front().second));
-//  The pop_back method for a vector should be non-throwing.
-        TaskOrder comp;
-        std::pop_heap(time_queue_.begin(), time_queue_.end(), comp);
-        time_queue_.pop_back();
 
-        if (time_queue_.empty())
-          break;
-      }
+    while (time_now >= time_queue_.front().first)
+    {
 //    If an exception was thrown, it was thrown in `push`. Because of the strong
 //  exception-safety guarantee, nothing actually happens.
-    } catch (std::bad_alloc &) { }
+      try {
+        push(std::move(time_queue_.front().second));
+      } catch (std::bad_alloc &) {
+        return;
+      }
+//  The pop_back method for a vector should be non-throwing.
+      std::pop_heap(time_queue_.begin(), time_queue_.end(), TaskOrder{});
+      time_queue_.pop_back();
+
+      if (time_queue_.empty())
+        break;
+    }
   }
 //  Note: Does no synchronization of its own.
   task_type extract_task (void)
@@ -420,7 +423,7 @@ struct alignas(kFalseSharingAlignment) Worker
     static_assert(std::is_trivial<OptionalTask::Empty>::value,
             "The default value for implicit optional values must be trivial.");
     tasks_[location].empty_ = OptionalTask::Empty();
-    return result;  //  I'd move, but copy elision is faster.
+    return result;
   }
 
   template<typename Func>
@@ -447,14 +450,14 @@ struct alignas(kFalseSharingAlignment) Worker
 "The behavior of the worker queue's starvation-avoidance algorithm has not yet \
 been examined in the case that the countdown variable is small relative to the \
 task-queue.");
-  std::uint_fast32_t  countdown_ : (std::numeric_limits<std::uint_fast32_t>::digits - 2),
+  std::uint_fast32_t  countdown_;
 //    While a task is being executed, the front_ marker is not incremented. This
 //  avoids early claiming of a new task (which would prevent that task from
 //  being stolen), but makes the push-to-front process a bit more complicated.
 //  In particular, the push-to-front should overwrite the front when first
 //  called during an execution, but not afterward.
-                      front_invalid_ : 1,
-                      paused_ : 1;
+  bool front_invalid_;
+  bool paused_;
 //    Need to keep the thread's handle for later joining. I could work around
 //  this, but the workaround would be less efficient.
   std::thread thread_ {};
@@ -732,7 +735,7 @@ void Worker::refresh_tasks (ThreadPoolImpl & tasks, unsigned number)
   {
     auto cnt = tasks.size();
     if (number > cnt)
-      number = cnt;
+      number = static_cast<unsigned>(cnt);
     task_type task;
 
     for (; number && pop(task); ++num_pushed, --number)
@@ -782,9 +785,9 @@ bool Worker::push (Task && task)
   if (((front - valid + kModulus) % kModulus) == 1)
     return false;
 
-  auto write     = get_write(back);
-  auto new_back  = (write + 1) % kModulus;
-  auto expected  = make_back(write);
+  index_type write     = get_write(back);
+  index_type new_back  = (write + 1) % kModulus;
+  index_type expected  = make_back(write);
   if (back_.compare_exchange_strong(expected, make_back(write, new_back),
                                     std::memory_order_acquire,
                                     std::memory_order_relaxed))
@@ -892,10 +895,9 @@ typename Worker::index_type Worker::count_tasks (void) const noexcept
 //  Attempts to steal work from other worker threads in the same pool.
 unsigned Worker::steal (void)
 {
-  auto num_workers = pool_.get_capacity();
-  decltype(num_workers) source = front_.load(std::memory_order_relaxed);
-  std::hash<typename std::thread::id> hasher;
-  source += hasher(thread_.get_id());
+  unsigned num_workers = pool_.get_capacity();
+  auto randomizer = front_.load(std::memory_order_relaxed);
+  unsigned source = static_cast<unsigned>(randomizer);
   unsigned stolen_count = 0;
   for (auto n = num_workers; n--;) {
     source = (source + 1) % num_workers;
@@ -913,7 +915,7 @@ unsigned Worker::steal (void)
 //  Sleeps if no work is available in this and other queues.
 void Worker::operator() (void)
 {
-  static constexpr std::size_t kPullFromQueue = (kModulus + 31) / 32;
+  static constexpr std::uint_fast32_t kPullFromQueue = 1 + (kModulus - 1) / 32;
   index_type last_size = 0;
 //    This thread-local variable allows O(1) scheduling (allows pushing directly
 //  to the local task queue).
@@ -1340,7 +1342,7 @@ ThreadPool::ThreadPool (unsigned threads)
   ThreadPoolImpl * impl = static_cast<ThreadPoolImpl*>(ptr);
   ptr = impl + 1;
 
-  new(impl) ThreadPoolImpl(workers, threads);
+  new(impl) ThreadPoolImpl(workers, static_cast<thread_counter_type>(threads));
 
   impl_ = impl;
   *reinterpret_cast<void**>(ptr) = memory.release();
