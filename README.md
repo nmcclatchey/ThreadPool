@@ -1,3 +1,5 @@
+[![Build Status](https://travis-ci.org/nmcclatchey/ThreadPool.svg?branch=travis)](https://travis-ci.org/nmcclatchey/ThreadPool)
+
 # ThreadPool
 
 Provides low-overhead concurrent scheduling in C++11 through [thread pools](https://en.wikipedia.org/wiki/Thread_pool "Wikipedia: Thread pool") and [work stealing](https://en.wikipedia.org/wiki/Work_stealing "Wikipedia: Work stealing"). The thread pool approach allows fine-grained parallelism by minimizing the overhead involved in scheduling a task. The work stealing approach allows efficient balancing of scheduled tasks across available threads.

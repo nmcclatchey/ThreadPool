@@ -1,0 +1,9 @@
+language: cpp
+compiler:
+  - gcc
+before_install:
+  - pip install --user cpp-coveralls
+script:
+  - cd build && cmake .. && make && make test
+after_success:
+  - coveralls --exclude tests -r .. -b . --gcov-options '\-lp'
