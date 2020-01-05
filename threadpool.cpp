@@ -1315,7 +1315,7 @@ ThreadPool::ThreadPool (unsigned threads)
   }
   using thread_counter_type = decltype(std::declval<ThreadPoolImpl>().get_concurrency());
   if (threads > std::numeric_limits<thread_counter_type>::max())
-    threads = std::numeric_limits<thread_counter_type>::max();
+    threads = (std::numeric_limits<thread_counter_type>::max() > std::numeric_limits<unsigned>::max()) ? std::numeric_limits<unsigned>::max() : std::numeric_limits<thread_counter_type>::max();
 //    Alignment change during Worker allocation is an integer multiple of
 //  alignof(Worker). If (alignof(Worker) >= alignof(ThreadPoolImpl)), then
 //  the second align will not do anything, and the problem is solved. Otherwise,

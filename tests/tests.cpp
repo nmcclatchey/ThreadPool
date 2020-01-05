@@ -137,12 +137,12 @@ int main()
         LOG("\t\t%s","Checking whether tasks are completed...");
         uint_fast64_t balance_min, balance_max, balance_total;
         gather_statistics(balance_min, balance_max, balance_total);
-        LOG("\t\tCompleted %llu / %llu tasks so far.", balance_total, kTestTotalTasks);
+        LOG("\t\tCompleted %llu / %llu tasks so far.", static_cast<long long unsigned>(balance_total), static_cast<long long unsigned>(kTestTotalTasks));
         if (pool.is_idle() && (balance_total == kTestTotalTasks))
         {
           gather_statistics(balance_min, balance_max, balance_total);
-          LOG("\tPool has idled, as expected, with all %llu tasks complete.", kTestTotalTasks);
-          LOG("\tProcessor utilization [min / mean / max]:\t%llu / %llu / %llu", balance_min, balance_total / pool.get_concurrency(), balance_max);
+          LOG("\tPool has idled, as expected, with all %llu tasks complete.", static_cast<long long unsigned>(kTestTotalTasks));
+          LOG("\tProcessor utilization [min / mean / max]:\t%llu / %llu / %llu", static_cast<long long unsigned>(balance_min), static_cast<long long unsigned>(balance_total / pool.get_concurrency()), static_cast<long long unsigned>(balance_max));
           break;
         }
         else if (balance_total == kTestTotalTasks)
