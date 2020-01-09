@@ -1,4 +1,5 @@
-[![Build Status](https://travis-ci.org/nmcclatchey/ThreadPool.svg?branch=travis)](https://travis-ci.org/nmcclatchey/ThreadPool)
+[![Build Status](https://travis-ci.org/nmcclatchey/ThreadPool.svg?branch=master)](https://travis-ci.org/nmcclatchey/ThreadPool)
+[![Coverage Status](https://coveralls.io/repos/github/nmcclatchey/ThreadPool/badge.svg?branch=master)](https://coveralls.io/github/nmcclatchey/ThreadPool?branch=master)
 
 # ThreadPool
 

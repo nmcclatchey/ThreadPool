@@ -1308,14 +1308,13 @@ ThreadPool::ThreadPool (unsigned threads)
 {
   if (threads == 0)
   {
-    threads = std::thread::hardware_concurrency();
-//  Only adjust the default if a hint is given.
-    if (threads < 2)
-      threads = 2;
+//    Hardware concurrency of 0 indicates that it is unknown. Make sure we have
+//  a few threads running.
+    threads = max(2, std::thread::hardware_concurrency());
   }
   using thread_counter_type = decltype(std::declval<ThreadPoolImpl>().get_concurrency());
-  if (threads > std::numeric_limits<thread_counter_type>::max())
-    threads = (std::numeric_limits<thread_counter_type>::max() > std::numeric_limits<unsigned>::max()) ? std::numeric_limits<unsigned>::max() : std::numeric_limits<thread_counter_type>::max();
+  threads = min(threads, min(std::numeric_limits<thread_counter_type>::max(),
+                             std::numeric_limits<unsigned>::max()));
 //    Alignment change during Worker allocation is an integer multiple of
 //  alignof(Worker). If (alignof(Worker) >= alignof(ThreadPoolImpl)), then
 //  the second align will not do anything, and the problem is solved. Otherwise,

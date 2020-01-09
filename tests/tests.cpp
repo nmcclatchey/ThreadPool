@@ -20,8 +20,8 @@
 using namespace std;
 
 constexpr size_t kTestMaxThreads = 1024;
-constexpr size_t kTestRootTasks = 10000;
-constexpr size_t kTestBranchFactor = 8000;
+constexpr size_t kTestRootTasks = 1000;
+constexpr size_t kTestBranchFactor = 800;
 constexpr uint_fast64_t kTestTotalTasks = kTestRootTasks * kTestBranchFactor;
 
 
@@ -96,7 +96,37 @@ int main()
     }
     LOG("\t%s","Destroy successful.");
   }
-  int logged_errors = 0;
+  std::atomic<int> logged_errors {0};
+  {
+    LOG("Test %u:\t%s", ++test_id, "Disallow null function pointers.");
+    LOG("\t%s","Constructing a thread pool.");
+    ThreadPool pool;
+    LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
+
+    pool.schedule([&](void)
+    {
+      try {
+        std::function<void()> null_func;
+        pool.schedule_subtask(null_func);
+        logged_errors |= 8;
+      } catch (std::bad_function_call &) {}
+      try {
+        pool.schedule_subtask(std::function<void()>());
+        logged_errors |= 8;
+      } catch (std::bad_function_call &) {}
+    });
+    try {
+      std::function<void()> null_func;
+      pool.schedule(null_func);
+      logged_errors |= 8;
+    } catch (std::bad_function_call &) {}
+    try {
+      pool.schedule(std::function<void()>());
+      logged_errors |= 8;
+    } catch (std::bad_function_call &) {}
+    LOG("\t%s", "Destroying the thread pool.");
+  }
+
   {
     LOG("Test %u:\t%s",++test_id,"Use threadpool for tasks.");
     LOG("\t%s","Constructing a thread pool.");
@@ -200,6 +230,15 @@ int main()
     pool.halt();
     LOG("\t%s","Waiting for 1 second...");
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    if (pool.is_halted())
+    {
+      LOG("\t%s", "Pool did pause.");
+    }
+    else
+    {
+      LOG("\t%s", "Pool did not pause. This is most unusual!");
+      logged_errors |= 4;
+    }
     LOG("\t%s","Unpausing...");
     pool.resume();
     LOG("\t%s","Waiting for 0.3 seconds...");
