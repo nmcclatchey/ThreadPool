@@ -87,7 +87,7 @@ constexpr Integer lsb (Integer x) noexcept
 /// \brief  Checks whether and integer is a power-of-2. Useful for alignment
 ///   debugging.
 template<class Integer>
-constexpr Integer is_pow2 (Integer x) noexcept
+constexpr bool is_pow2 (Integer x) noexcept
 {
   return ((x - 1) & x) == 0;
 }
