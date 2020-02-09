@@ -30,7 +30,7 @@
 //  Central queue management:
 #include <algorithm>          //  Delayed-task sorting.
 #include <vector>             //  Delayed-task storage.
-#include <queue>              //  For central task queue.
+#include <deque>              //  For central task queue.
 //  Miscellaneous type information:
 #include <type_traits>        //  Detect conditions needed for noexcept.
 #include <utility>            //  For std::declval
@@ -181,17 +181,17 @@ struct ThreadPoolImpl
     if (idle_ > 0)
       cv_.notify_one();
   }
-  inline bool might_have_task (void) const
+  inline bool might_have_task (void) const noexcept
   {
     return !queue_.empty();
   }
 //  Note: Does no synchronization of its own.
-  inline bool has_task (void) const
+  inline bool has_task (void) const noexcept
   {
     return !queue_.empty();
   }
 //  Note: Does no synchronization of its own.
-  inline std::size_t size (void) const
+  inline std::size_t size (void) const noexcept
   {
     return queue_.size();
   }
@@ -224,7 +224,7 @@ struct ThreadPoolImpl
   {
     assert(!queue_.empty() && "Cannot retrieve a task from an empty queue.");
     task_type result = std::move(queue_.front());
-    queue_.pop();
+    queue_.pop_front();
     return result;
   }
 
@@ -233,7 +233,7 @@ struct ThreadPoolImpl
   template<typename Task>
   inline void push (Task && task)
   {
-    queue_.push(std::forward<Task>(task));
+    queue_.push_back(std::forward<Task>(task));
   }
 
 /// \par  Exception safety
@@ -273,7 +273,7 @@ struct ThreadPoolImpl
   std::condition_variable cv_ {};
   mutable std::mutex mutex_ {};
 
-  std::queue<task_type> queue_ {};
+  std::deque<task_type> queue_ {};
   std::vector<timed_task> time_queue_ {};
 
   Worker * const workers_;
