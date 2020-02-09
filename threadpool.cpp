@@ -945,9 +945,8 @@ void Worker::operator() (void)
   {
     if (--countdown_ == 0)
     {
-      index_type size = count_tasks();
-      if (size >= kModulus)
-        size = kModulus - 1;
+      auto task_count = count_tasks();
+      index_type size = (task_count <= kModulus / 16) ? task_count * 16 : kModulus - 1;
       countdown_ = size + 2;
 
 //    Periodically check whether the program is trying to destroy the pool.
