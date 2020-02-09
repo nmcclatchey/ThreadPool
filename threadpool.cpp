@@ -92,6 +92,17 @@ constexpr bool is_pow2 (Integer x) noexcept
   return ((x - 1) & x) == 0;
 }
 
+/// \brief  Checks whether (n1 > n2) || (n1 == 0). Clang optimizes this, while
+///   GCC does not (even in 9.0)
+template<class Integer>
+inline constexpr bool greater_or_zero (Integer n1, Integer n2) noexcept
+{
+  //  return (n1 > n2) || (n1 == 0);
+  static_assert(std::numeric_limits<Integer>::is_signed == false,
+                "This optimization depends on using unsigned comparison.");
+  return (n1 - 1u >= n2);
+}
+
 static_assert(is_pow2(kFalseSharingAlignment),
               "Alignments must be integer powers of 2.");
 
@@ -397,8 +408,8 @@ struct alignas(kFalseSharingAlignment) Worker
 
 
   unsigned steal (void);
-  unsigned steal_from (Worker & source, unsigned divisor)   noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_constructible<task_type>::value);
-  bool pop (task_type & task)                               noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_assignable<task_type>::value);
+  unsigned steal_from (Worker & source) noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_constructible<task_type>::value);
+  bool pop (task_type & task)           noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_assignable<task_type>::value);
   unsigned push_front(ThreadPoolImpl &, unsigned number);
   bool execute (void);
   void refresh_tasks (ThreadPoolImpl &, unsigned number);
@@ -554,9 +565,10 @@ void Worker::remove_all_and (Func const & func)
 //    Steals approximately [available] / [divisor] tasks from source, if
 //  possible. Returns number of successfully stolen tasks.
 /// \note noexcept if place_task and remove_task are both noexcept.
-unsigned Worker::steal_from (Worker & source, unsigned divisor)
+unsigned Worker::steal_from (Worker & source)
     noexcept(std::is_nothrow_destructible<task_type>::value && std::is_nothrow_move_constructible<task_type>::value)
 {
+  static constexpr unsigned kDivisor = 4;
   index_type this_front,    this_back,    writeable, stolen,
               source_front, source_back,  source_valid, source_write;
 //  Worker::steal_from may only be called from the Worker's owned thread.
@@ -587,9 +599,7 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
 //  items in source queue.
     if (valid < 2)
       return 0;
-    stolen = (valid + divisor - 2) / divisor;
-    if (writeable < stolen)
-      stolen = writeable;
+    stolen = min((valid + kDivisor - 2) / kDivisor, writeable);
     source_write = (source_valid - stolen + kModulus) % kModulus;
 
     if (source.back_.compare_exchange_weak(source_back,
@@ -619,9 +629,9 @@ unsigned Worker::steal_from (Worker & source, unsigned divisor)
     index_type readable = get_distance(source_front, source_write);
 //    Even if READ <= VALID, (that is, normal behavior), if READ == WRITE then
 //  we must increment WRITE as READ may be incremented during the write phase.
-    if ((readable > valid) || (readable == 0))
+    if (greater_or_zero(readable, valid))
     {
-      stolen = (valid + divisor - 2) / divisor;
+      stolen = (valid + kDivisor - 2) / kDivisor;
 //    Thief's number of held tasks can only be reduced since last check, so
 //  there is no reason to double-check whether thief can hold the tasks.
       source_write = (source_valid - stolen + kModulus) % kModulus;
@@ -663,7 +673,7 @@ bool Worker::pop (task_type & task)
 //    Two circumstances can prevent reading: Either there is nothing to read, or
 //  the current location is claimed. Even once the claim is resolved, there may
 //  or may not be something to read.
-  if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
+  if (greater_or_zero(readable, get_distance(front, get_valid(back))))
     return false;
 
   task = remove_task(front);
@@ -688,7 +698,7 @@ bool Worker::execute (void)
 //    Two circumstances can prevent reading: Either there is nothing to read, or
 //  the current location is claimed. Even once the claim is resolved, there may
 //  or may not be something to read.
-  if ((readable == 0) || (readable > get_distance(front, get_valid(back))))
+  if (greater_or_zero(readable, get_distance(front, get_valid(back))))
     return false;
 
 //    Will ensure that the queue is restored to validity, even in the event of
@@ -904,7 +914,7 @@ unsigned Worker::steal (void)
     Worker * victim = pool_.data() + source;
     if (victim == this)
       continue;
-    stolen_count += steal_from(*victim, num_workers);
+    stolen_count += steal_from(*victim);
     if (stolen_count > 0)
       break;
   }
