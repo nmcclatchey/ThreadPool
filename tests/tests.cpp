@@ -19,17 +19,12 @@
 
 using namespace std;
 
+namespace
+{
 constexpr size_t kTestMaxThreads = 1024;
 constexpr size_t kTestRootTasks = 1000;
 constexpr size_t kTestBranchFactor = 800;
 constexpr uint_fast64_t kTestTotalTasks = kTestRootTasks * kTestBranchFactor;
-
-
-void perform_task (void);
-void gather_statistics  (uint_fast64_t & balance_min,
-                         uint_fast64_t & balance_max,
-                         uint_fast64_t & balance_total);
-void stay_active (ThreadPool &);
 
 thread_local std::atomic<uint_fast64_t> * task_slot_local = nullptr;
 std::atomic<uint_fast32_t> task_slot_next(0);
@@ -79,6 +74,7 @@ void gather_statistics  (uint_fast64_t & balance_min,
       balance_min = it;
     balance_total += it;
   }
+}
 }
 
 int main()
@@ -160,7 +156,7 @@ int main()
       for (unsigned ii = 0; ii < 9; ++ii)
       {
         using namespace std::chrono;
-        unsigned sleep_ms = (100 << ii);
+        unsigned sleep_ms = (100u << ii);
         std::this_thread::sleep_for(milliseconds(sleep_ms));
         total_ms += sleep_ms;
 

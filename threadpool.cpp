@@ -1319,7 +1319,7 @@ ThreadPool::ThreadPool (unsigned threads)
   {
 //    Hardware concurrency of 0 indicates that it is unknown. Make sure we have
 //  a few threads running.
-    threads = max(2, std::thread::hardware_concurrency());
+    threads = max(2u, std::thread::hardware_concurrency());
   }
   using thread_counter_type = decltype(std::declval<ThreadPoolImpl>().get_concurrency());
   threads = min(threads, min(std::numeric_limits<thread_counter_type>::max(),
