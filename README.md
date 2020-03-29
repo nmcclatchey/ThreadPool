@@ -16,7 +16,7 @@ Provides low-overhead concurrent scheduling in C++11 through [thread pools](http
 - It is designed for efficiency and scalability:
     + Load balancing ensures that as long as there is work to do, it is being done by as many threads as possible.
     + Lock-free data structures use [weak atomic orderings](https://en.cppreference.com/w/cpp/atomic/memory_order#Release-Acquire_ordering "C++ Reference: Release-Acquire ordering"); only when those cores that require new tasks are synchronized.
-    + No busy-waiting. Idle threads use [condition variables](https://en.cppreference.com/w/cpp/thread/condition_variable "C++ Reference: condition_variable) to wait without using the CPU.
+    + No busy-waiting. Idle threads use [condition variables](https://en.cppreference.com/w/cpp/thread/condition_variable "C++ Reference: condition_variable") to wait without using the CPU.
 - It is explicitly documented:
     + Full generated documentation via [Doxygen](http://www.doxygen.nl/).
     + Memory synchronization between task scheduling and execution is explicitly stated in terms of [C++11's memory model](https://en.cppreference.com/w/cpp/atomic/memory_order "C++ Reference: Memory order").
