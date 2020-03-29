@@ -120,6 +120,15 @@ int main()
       pool.schedule(std::function<void()>());
       logged_errors |= 8;
     } catch (std::bad_function_call &) {}
+    try {
+      std::function<void()> null_func;
+      pool.schedule_after(1s, null_func);
+      logged_errors |= 8;
+    } catch (std::bad_function_call &) {}
+    try {
+      pool.schedule_after(1s, std::function<void()>());
+      logged_errors |= 8;
+    } catch (std::bad_function_call &) {}
     LOG("\t%s", "Destroying the thread pool.");
   }
 
@@ -138,7 +147,7 @@ int main()
       LOG("\tScheduling some %s tasks...", (nn == 0) ? "immediate" : "delayed");
       pool.schedule([&](void)
       {
-        for (unsigned i = 0; i < kTestRootTasks; ++i)
+        for (unsigned i = 0; i < kTestRootTasks / 2; ++i)
         {
           pool.schedule_after(std::chrono::seconds(nn), [&](void)
           {
@@ -147,6 +156,17 @@ int main()
               pool.schedule_subtask(&perform_task);
             }
           });
+        }
+        for (unsigned i = kTestRootTasks / 2; i < kTestRootTasks; ++i)
+        {
+          std::function<void(void)> lvalue_task ( [&](void)
+          {
+            for (unsigned j = 0; j < kTestBranchFactor; ++j)
+            {
+              pool.schedule_subtask(&perform_task);
+            }
+          } );
+          pool.schedule_after(std::chrono::seconds(nn), lvalue_task);
         }
       });
       LOG("\t\t%s","Done. Tasks scheduled successfully.");
@@ -224,8 +244,8 @@ int main()
     LOG("\t\t%s","Done. Tasks scheduled successfully.");
     LOG("\t%s","Pausing...");
     pool.halt();
-    LOG("\t%s","Waiting for 1 second...");
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    LOG("\t%s","Waiting for a bit...");
+    std::this_thread::sleep_for(250ms);
     if (pool.is_halted())
     {
       LOG("\t%s", "Pool did pause.");
@@ -238,7 +258,7 @@ int main()
     LOG("\t%s","Unpausing...");
     pool.resume();
     LOG("\t%s","Waiting for 0.3 seconds...");
-    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    std::this_thread::sleep_for(300ms);
     LOG("\t%s", "Destroying the thread pool.");
   }
 
@@ -259,6 +279,8 @@ int main()
     LOG("\t\t%s","Done. Tasks scheduled successfully.");
     LOG("\t%s","Pausing...");
     pool.halt();
+    while (!pool.is_halted())
+      std::this_thread::sleep_for(50ms);
     LOG("\t%s", "Destroying the thread pool.");
   }
 
@@ -278,12 +300,12 @@ int main()
       cv.wait(guard, [](void)->bool { return one_is_active; });
     }
     LOG("\t\t%s","Done. Tasks scheduled successfully.");
-    LOG("\t\t%s","Done. Waiting for 1 second...");
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    LOG("\t\t%s","Done. Waiting for a bit...");
+    std::this_thread::sleep_for(250ms);
     LOG("\t%s","Unpausing...");
     pool.resume();
-    LOG("\t\t%s","Done. Waiting for 1 second...");
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    LOG("\t\t%s","Done. Waiting for a bit...");
+    std::this_thread::sleep_for(250ms);
     LOG("\t%s", "Destroying the thread pool.");
   }
 
