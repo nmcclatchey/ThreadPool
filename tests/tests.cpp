@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <atomic>
 #include <cstdint>
+#include <chrono>
 
 #define LOG(fmtString,...) printf(fmtString "\n", ##__VA_ARGS__); fflush(stdout)
 
@@ -29,6 +30,7 @@ constexpr uint_fast64_t kTestTotalTasks = kTestRootTasks * kTestBranchFactor;
 thread_local std::atomic<uint_fast64_t> * task_slot_local = nullptr;
 std::atomic<uint_fast32_t> task_slot_next(0);
 std::atomic<uint_fast64_t> executed_tasks [kTestMaxThreads * 64];
+
 
 void perform_task (void)
 {
@@ -79,7 +81,6 @@ void gather_statistics  (uint_fast64_t & balance_min,
 
 int main()
 {
-  using namespace std::literals::chrono_literals;
   int test_id = 0;
   {
     LOG("Test %u:\t%s",++test_id,"Query static information");
@@ -123,11 +124,11 @@ int main()
     } catch (std::bad_function_call &) {}
     try {
       std::function<void()> null_func;
-      pool.schedule_after(1s, null_func);
+      pool.schedule_after(std::chrono::seconds(1), null_func);
       logged_errors |= 8;
     } catch (std::bad_function_call &) {}
     try {
-      pool.schedule_after(1s, std::function<void()>());
+      pool.schedule_after(std::chrono::seconds(1), std::function<void()>());
       logged_errors |= 8;
     } catch (std::bad_function_call &) {}
     LOG("\t%s", "Destroying the thread pool.");
@@ -246,7 +247,7 @@ int main()
     LOG("\t%s","Pausing...");
     pool.halt();
     LOG("\t%s","Waiting for a bit...");
-    std::this_thread::sleep_for(250ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
     if (pool.is_halted())
     {
       LOG("\t%s", "Pool did pause.");
@@ -259,7 +260,7 @@ int main()
     LOG("\t%s","Unpausing...");
     pool.resume();
     LOG("\t%s","Waiting for 0.3 seconds...");
-    std::this_thread::sleep_for(300ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
     LOG("\t%s", "Destroying the thread pool.");
   }
 
@@ -281,7 +282,7 @@ int main()
     LOG("\t%s","Pausing...");
     pool.halt();
     while (!pool.is_halted())
-      std::this_thread::sleep_for(50ms);
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
     LOG("\t%s", "Destroying the thread pool.");
   }
 
@@ -302,11 +303,11 @@ int main()
     }
     LOG("\t\t%s","Done. Tasks scheduled successfully.");
     LOG("\t\t%s","Done. Waiting for a bit...");
-    std::this_thread::sleep_for(250ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
     LOG("\t%s","Unpausing...");
     pool.resume();
     LOG("\t\t%s","Done. Waiting for a bit...");
-    std::this_thread::sleep_for(250ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
     LOG("\t%s", "Destroying the thread pool.");
   }
 
@@ -327,7 +328,7 @@ int main()
     }
     LOG("\t\t%s","Done. Tasks scheduled successfully.");
     LOG("\t\t%s","Done. Waiting for a bit second...");
-    std::this_thread::sleep_for(250ms);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
     LOG("\t%s", "Destroying the thread pool.");
   }
   LOG("%s", "Exiting...");
