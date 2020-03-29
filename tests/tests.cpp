@@ -79,6 +79,7 @@ void gather_statistics  (uint_fast64_t & balance_min,
 
 int main()
 {
+  using namespace std::literals::chrono_literals;
   int test_id = 0;
   {
     LOG("Test %u:\t%s",++test_id,"Query static information");
