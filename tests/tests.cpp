@@ -286,6 +286,27 @@ int main()
     std::this_thread::sleep_for(std::chrono::seconds(1));
     LOG("\t%s", "Destroying the thread pool.");
   }
+
+  {
+    LOG("Test %u:\t%s",++test_id,"Attempt to pause from within a worker thread, and then destroy the pool.");
+    LOG("\t%s","Constructing a thread pool.");
+    ThreadPool pool;
+    LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
+    LOG("\t%s", "Scheduling a few tasks, including a pausing task.");
+    {
+      std::unique_lock<decltype(mtx)> guard (mtx);
+      one_is_active = false;
+      alive_count = 0;
+      for (unsigned n = 0; n < 16; ++n)
+        pool.schedule([&pool](void) { stay_active(pool); });
+      pool.schedule([&pool](void) { stay_active(pool); pool.halt(); pool.halt(); pool.halt(); });
+      cv.wait(guard, [](void)->bool { return one_is_active; });
+    }
+    LOG("\t\t%s","Done. Tasks scheduled successfully.");
+    LOG("\t\t%s","Done. Waiting for a bit second...");
+    std::this_thread::sleep_for(250ms);
+    LOG("\t%s", "Destroying the thread pool.");
+  }
   LOG("%s", "Exiting...");
   return logged_errors;
 }
