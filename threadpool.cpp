@@ -253,10 +253,8 @@ struct ThreadPoolImpl
   template<typename Task>
   inline void push_at (clock::time_point const & tp, Task && task)
   {
-    //time_queue_.push(timed_task{tp, std::forward<Task>(task)});
     time_queue_.push_back(timed_task{tp, std::forward<Task>(task)});
-    TaskOrder comp;
-    std::push_heap(time_queue_.begin(), time_queue_.end(), comp);
+    std::push_heap(time_queue_.begin(), time_queue_.end(), TaskOrder{});
   }
 
 //  Note: wait and wait_until don't throw in C++14 and later.
@@ -275,7 +273,7 @@ struct ThreadPoolImpl
   }
  private:
   struct TaskOrder {
-    inline bool operator() (timed_task const & lhs, timed_task const & rhs) const
+    inline bool operator() (timed_task const & lhs, timed_task const & rhs) const noexcept
     {
       return lhs.first > rhs.first;
     }
@@ -499,7 +497,7 @@ Worker::~Worker (void)
   assert(!front_invalid_ && "Attempting to destroy a running worker!");
 
 //    Remove tasks without using them in any way.
-  remove_all_and([](task_type&&){});
+  remove_all_and([](task_type&&) noexcept {});
 }
 
 //    Removes each task from a Worker and applies func to it. Note: Must
@@ -1209,9 +1207,14 @@ bool ThreadPoolImpl::is_idle (void) const
 template<typename Task>
 void ThreadPoolImpl::schedule_overflow (Task && task)
 {
-  std::lock_guard<decltype(mutex_)> guard (mutex_);
-  push(std::forward<Task>(task)); // < Strong exception-safety guarantee.
-  notify_if_idle();
+  bool idle;
+  {
+    std::lock_guard<decltype(mutex_)> guard (mutex_);
+    push(std::forward<Task>(task)); // < Strong exception-safety guarantee.
+    idle = idle_ > 0;
+  }
+  if (idle)
+    cv_.notify_one();
 }
 
 /// \par Exception safety
@@ -1219,11 +1222,16 @@ void ThreadPoolImpl::schedule_overflow (Task && task)
 template<typename Task>
 void ThreadPoolImpl::schedule_after (clock::duration const & dur, Task && task)
 {
-  std::lock_guard<decltype(mutex_)> guard (mutex_);
-  push_at(clock::now() + dur, std::forward<Task>(task));
+  bool idle;
+  {
+    std::lock_guard<decltype(mutex_)> guard (mutex_);
+    push_at(clock::now() + dur, std::forward<Task>(task));
 //    Wake the waiters, just in case the scheduled time is earlier than that for
 //  which they were waiting.
-  notify_if_idle();
+    idle = idle_ > 0;
+  }
+  if (idle)
+    cv_.notify_one();
 }
 
 
