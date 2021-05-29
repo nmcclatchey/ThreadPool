@@ -1081,7 +1081,8 @@ ThreadPoolImpl::ThreadPoolImpl (Worker * workers, index_type num_workers)
 ThreadPoolImpl::~ThreadPoolImpl (void)
 {
 #ifndef NDEBUG
-  if ((current_worker != nullptr) && current_worker->belongs_to(this))
+  Worker * p_worker = current_worker;
+  if ((p_worker != nullptr) && p_worker->belongs_to(this))
   {
     std::printf("ERROR!\tA worker thread may not destroy the ThreadPool to \
 which it belongs.\n");
@@ -1136,19 +1137,20 @@ void ThreadPoolImpl::halt (void)
   if (stop_.load(std::memory_order_relaxed) & 0x04)
     return;
   stop_.store(0x03, std::memory_order_relaxed);
-  if ((current_worker != nullptr) && current_worker->belongs_to(this))
+  Worker * p_worker = current_worker;
+  if ((p_worker != nullptr) && p_worker->belongs_to(this))
   {
-    current_worker->set_paused(true);
+    p_worker->set_paused(true);
     ++paused_;
   }
   stop_threads(guard);
 //  If the caller is part of the pool, block execution until unpaused.
-  if ((current_worker != nullptr) && current_worker->belongs_to(this))
+  if ((p_worker != nullptr) && p_worker->belongs_to(this))
   {
     cv_.wait(guard, [this] (void) -> bool {
       return (stop_.load(std::memory_order_relaxed) & 0x02) == 0;
     });
-    current_worker->set_paused(false);
+    p_worker->set_paused(false);
     --paused_;
   }
 }
