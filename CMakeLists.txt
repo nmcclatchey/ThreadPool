@@ -16,8 +16,11 @@ set_target_properties(threadpool PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(threadpool Threads::Threads)
 
 if (BUILD_TESTING)
-    set(CMAKE_CXX_FLAGS "-g -O0 -Wall -fprofile-arcs -ftest-coverage")
-    add_executable(check ${CMAKE_CURRENT_SOURCE_DIR}/tests/tests.cpp)
+#    set(CMAKE_CXX_FLAGS "-g -O0 -Wall -fprofile-arcs -ftest-coverage")
+    add_executable(check ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_pool.cpp)
     target_link_libraries(check threadpool)
     add_test(NAME threadpool_standalone_tests COMMAND check)
+
+    add_executable(check_latch ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_latch.cpp)
+    add_test(NAME latch_standalone_tests COMMAND check_latch)
 endif (BUILD_TESTING)

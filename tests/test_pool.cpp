@@ -95,23 +95,36 @@ int main()
     LOG("\t%s","Destroy successful.");
   }
   std::atomic<int> logged_errors {0};
+#ifndef NDEBUG
   {
     LOG("Test %u:\t%s", ++test_id, "Disallow null function pointers.");
     LOG("\t%s","Constructing a thread pool.");
     ThreadPool pool;
     LOG("\t\tDone.\tNote: Pool has %u worker threads.", pool.get_concurrency());
 
+    std::condition_variable schedule_cv;
+    std::mutex schedule_mtx;
+    bool ready = false;
+    
     pool.schedule([&](void)
     {
       try {
-        std::function<void()> null_func;
-        pool.schedule_subtask(null_func);
-        logged_errors |= 8;
-      } catch (std::bad_function_call &) {}
-      try {
-        pool.schedule_subtask(std::function<void()>());
-        logged_errors |= 8;
-      } catch (std::bad_function_call &) {}
+        try {
+          std::function<void()> null_func;
+          pool.schedule_subtask(null_func);
+          logged_errors |= 8;
+        } catch (std::bad_function_call &) {}
+        try {
+          pool.schedule_subtask(std::function<void()>());
+          logged_errors |= 8;
+        } catch (std::bad_function_call &) {}
+      } catch (...)
+      {
+        logged_errors  |= 8;
+      }
+      std::lock_guard<std::mutex> guard {schedule_mtx};
+      ready = true;
+      schedule_cv.notify_all();
     });
     try {
       std::function<void()> null_func;
@@ -131,8 +144,11 @@ int main()
       pool.schedule_after(std::chrono::seconds(1), std::function<void()>());
       logged_errors |= 8;
     } catch (std::bad_function_call &) {}
+    std::unique_lock<std::mutex> lck {schedule_mtx};
+    schedule_cv.wait(lck,[&ready]()->bool { return ready; });
     LOG("\t%s", "Destroying the thread pool.");
   }
+#endif
 
   {
     LOG("Test %u:\t%s",++test_id,"Use threadpool for tasks.");
