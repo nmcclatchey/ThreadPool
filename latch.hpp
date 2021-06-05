@@ -5,7 +5,10 @@
 #ifndef LATCH_HPP_
 #define LATCH_HPP_
 
-#if __cplusplus < 202002L
+#if (__cplusplus >= 202002L) && __has_include(<latch>)
+#include <latch>
+using std::latch;
+#else
 #include <atomic>
 #include <cassert>
 #include <limits>
@@ -97,9 +100,6 @@ class latch
     return std::numeric_limits<int>::max();
   }
 };
-#else
-#include <latch>
-using std::latch;
 #endif
 
 #endif // LATCH_HPP_
