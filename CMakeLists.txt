@@ -24,4 +24,8 @@ if (BUILD_TESTING)
     add_executable(check_latch ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_latch.cpp)
     target_link_libraries(check_latch Threads::Threads)
     add_test(NAME latch_standalone_tests COMMAND check_latch)
+
+    add_executable(example_latchpool ${CMAKE_CURRENT_SOURCE_DIR}/example.cpp)
+    target_link_libraries(example_latchpool threadpool Threads::Threads)
+    add_test(NAME latch_pool_example COMMAND example_latchpool)
 endif (BUILD_TESTING)
