@@ -15,6 +15,7 @@
 #include <atomic>
 #include <cstdint>
 #include <chrono>
+#include <iostream>
 
 #define LOG(fmtString,...) std::printf(fmtString "\n", ##__VA_ARGS__); fflush(stdout)
 
@@ -55,13 +56,29 @@ int main()
       std::thread new_thread([i,&test_latch, &counter, &result_code](){
           std::this_thread::sleep_for(std::chrono::milliseconds(500 * (i + 1)));
           counter.fetch_add(1, std::memory_order_relaxed);
-          test_latch.arrive_and_wait(1);
+          try
+          {
+            test_latch.arrive_and_wait(1);
+          }
+          catch(const std::system_error & e)
+          {
+            std::cerr << "Arrive-and-wait error code " << e.code() << ": " << e.what() << '\n';
+            result_code.fetch_or(16, std::memory_order_relaxed);
+          }
           if (counter.load(std::memory_order_relaxed) != 4)
             result_code.fetch_or(8, std::memory_order_relaxed);
         });
       new_thread.detach();
     }
-    test_latch.wait();
+    try
+    {
+      test_latch.wait();
+    }
+    catch(const std::system_error & e)
+    {
+      std::cerr << "Wait error code " << e.code() << ": " << e.what() << '\n';
+      result_code.fetch_or(32, std::memory_order_relaxed);
+    }
     if (counter.load(std::memory_order_relaxed) != 4)
       result_code.fetch_or(4, std::memory_order_relaxed);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));

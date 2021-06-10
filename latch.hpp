@@ -12,6 +12,7 @@ using std::latch;
 #include <cstdint>
 #include <cassert>
 #include <limits>
+#include <system_error>
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
 #include <synchapi.h>
@@ -80,7 +81,8 @@ class latch
       LONG expected = InterlockedCompareExchangeAcquire(const_cast<LONG *>(&wait_for_), 0, 0);
       if (expected == 0)
         break;
-      WaitOnAddress(const_cast<LONG *>(&wait_for_), &expected, sizeof(LONG), 1000);
+      if (!WaitOnAddress(const_cast<LONG *>(&wait_for_), &expected, sizeof(LONG), INFINITE))
+        throw std::system_error(GetLastError(), std::system_category());
     } while (true);
   }
 
@@ -103,7 +105,8 @@ class latch
     {
       LONG expected = previously_waiting - n;
       do {
-        WaitOnAddress(&wait_for_, &expected, sizeof(LONG), 3000);
+        if (!WaitOnAddress(&wait_for_, &expected, sizeof(LONG), INFINITE))
+          throw std::system_error(GetLastError(), std::system_category());
         expected = InterlockedCompareExchangeAcquire(&wait_for_, 0, 0);
       } while (expected != 0);
     }
