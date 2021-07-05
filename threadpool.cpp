@@ -674,15 +674,34 @@ bool Worker::pop (task_type & task)
   if (greater_or_zero(readable, get_distance(front, get_valid(back))))
     return false;
 
-  if (front_invalid_ && (readable == 1))
-    return false;
-
   auto new_front = (front + 1) % kModulus;
-  task = remove_task(front_invalid_ ? new_front : front);
-  front_.store(new_front, std::memory_order_relaxed);
-//  I need to release back_ so that the write to front_ is visible to thieves.
-  back_.fetch_or(0, std::memory_order_release);
-  return true;
+  if (!front_invalid_)
+  {
+    task = remove_task(front);
+    front_.store(new_front, std::memory_order_relaxed);
+  //  I need to release back_ so that the write to front_ is visible to thieves.
+    back_.fetch_or(0, std::memory_order_release);
+    return true;
+  }
+  else if (readable > 1)
+  {
+    front_.store(new_front, std::memory_order_relaxed);
+    back = back_.fetch_or(0, std::memory_order_acq_rel);
+    if (greater_or_zero(get_distance(new_front, get_write(back)), get_distance(new_front, get_valid(back))))
+    {
+//    By the time we advanced the pointer, the task we intended to read was
+//  already removed. Don't read it.
+      front_invalid_ = false;
+      return false;
+    }
+    else
+    {
+      task = remove_task(new_front);
+      return true;
+    }
+  }
+  else
+    return false;
 }
 
 //    Removes, then performs the task at the front of the queue. Claims the next
