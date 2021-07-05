@@ -674,9 +674,12 @@ bool Worker::pop (task_type & task)
   if (greater_or_zero(readable, get_distance(front, get_valid(back))))
     return false;
 
-  task = remove_task(front);
+  if (front_invalid_ && (readable == 1))
+    return false;
 
-  front_.store((front + 1) % kModulus, std::memory_order_relaxed);
+  auto new_front = (front + 1) % kModulus;
+  task = remove_task(front_invalid_ ? new_front : front);
+  front_.store(new_front, std::memory_order_relaxed);
 //  I need to release back_ so that the write to front_ is visible to thieves.
   back_.fetch_or(0, std::memory_order_release);
   return true;
