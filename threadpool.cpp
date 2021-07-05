@@ -8,7 +8,7 @@
 /// library, use the [*MinGW Windows STD Threads* library](https://github.com/meganz/mingw-std-threads "MinGW STD Threads").
 #include "threadpool.hpp"
 
-#if !defined(__cplusplus) || (__cplusplus < 201103L)
+#if !defined(__cplusplus)
 #error The implementation of ThreadPool requires C++11 or higher.
 #endif
 
